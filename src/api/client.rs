@@ -24,13 +24,17 @@ const RELEASE_SECRET: &str = match option_env!("LUXCTL_CLIENT_SECRET") {
 };
 
 use super::types::{
-    ApiError, ApiUser, HealthCheckResponse, HintsResponse, PaginatedResponse, Project,
-    RestartProjectResponse, SubmitAnswerRequest, SubmitAnswerResponse, SubmitAttemptRequest,
-    SubmitAttemptResponse, Terminal, UnlockHintResponse,
+    ApiError, ApiUser, AttemptData, HealthCheckResponse, PaginatedResponse, Project,
+    RestartProjectData, SubmitAttemptRequest, Task, TaskHint,
 };
 
 /// Produce (timestamp, hex-encoded HMAC-SHA256) for the given HTTP method + path.
-/// The payload format is "timestamp.METHOD.path", matching Laravel's VerifyLuxctlClient middleware.
+/// The payload format is "timestamp.METHOD.path", which the api's signature
+/// middleware rebuilds and compares, inside a +/-300s replay window.
+///
+/// The body is not signed. That is the scheme's limit: the signature says the
+/// caller holds the client secret and that the request is recent, and
+/// everything a body can do is gated again by the bearer token.
 fn sign_request(method: &str, path: &str, secret: &str) -> (String, String) {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -48,7 +52,7 @@ fn sign_request(method: &str, path: &str, secret: &str) -> (String, String) {
     (timestamp, hex::encode(mac.finalize().into_bytes()))
 }
 
-/// Build the three signing headers that Laravel expects on every /api/v1/* request.
+/// Build the three signing headers every /api/v1/* request carries.
 fn signing_headers(method: &str, path: &str, secret: &str) -> Result<HeaderMap> {
     let (timestamp, signature) = sign_request(method, path, secret);
     let mut headers = HeaderMap::new();
@@ -156,7 +160,12 @@ impl LighthouseAPIClient {
             let status = response.status();
             let error_text = response.text().await?;
             let message = serde_json::from_str::<ApiError>(&error_text)
-                .map(|e| e.message)
+                .map(|e| match e.code.is_empty() {
+                    // the code is what a reader can act on — `task_locked`
+                    // says finish the one before, and the prose is a fallback.
+                    true => e.error,
+                    false => format!("{} ({})", e.error, e.code),
+                })
                 .unwrap_or(error_text);
             return Err(eyre!("[HTTP {}] {}", status.as_u16(), message));
         }
@@ -187,7 +196,12 @@ impl LighthouseAPIClient {
             let status = response.status();
             let error_text = response.text().await?;
             let message = serde_json::from_str::<ApiError>(&error_text)
-                .map(|e| e.message)
+                .map(|e| match e.code.is_empty() {
+                    // the code is what a reader can act on — `task_locked`
+                    // says finish the one before, and the prose is a fallback.
+                    true => e.error,
+                    false => format!("{} ({})", e.error, e.code),
+                })
                 .unwrap_or(error_text);
             return Err(eyre!("[HTTP {}] {}", status.as_u16(), message));
         }
@@ -231,65 +245,48 @@ impl LighthouseAPIClient {
         self.get::<Project>(&endpoint, None, Some(headers)).await
     }
 
-    pub async fn submit_attempt(
-        &self,
-        request: &SubmitAttemptRequest,
-    ) -> Result<SubmitAttemptResponse> {
+    /// one task, by uuid or slug.
+    ///
+    /// the only endpoint that carries a task's brief: a project response lists
+    /// its tasks without their prose, so a whole project's descriptions are not
+    /// shipped to print one.
+    pub async fn task_by_identifier(&self, identifier: &str) -> Result<Task> {
         let headers = self.auth_headers()?;
-        self.post::<SubmitAttemptResponse, _>("projects/attempts", request, Some(headers))
+        let endpoint = format!("tasks/{}", identifier);
+        self.get::<Task>(&endpoint, None, Some(headers)).await
+    }
+
+    /// record one attempt. the response is the row, unwrapped — the api
+    /// answers the view itself rather than nesting it under `data`.
+    pub async fn submit_attempt(&self, request: &SubmitAttemptRequest) -> Result<AttemptData> {
+        let headers = self.auth_headers()?;
+        self.post::<AttemptData, _>("projects/attempts", request, Some(headers))
             .await
     }
 
-    pub async fn hints(&self, task_slug: &str) -> Result<HintsResponse> {
+    /// every hint on a task, with the words of the ones this reader has bought.
+    pub async fn hints(&self, task_slug: &str) -> Result<Vec<TaskHint>> {
         let headers = self.auth_headers()?;
         let endpoint = format!("tasks/{}/hints", task_slug);
-        self.get::<HintsResponse>(&endpoint, None, Some(headers))
+        self.get::<Vec<TaskHint>>(&endpoint, None, Some(headers))
             .await
     }
 
-    pub async fn unlock_hint(
-        &self,
-        task_slug: &str,
-        hint_uuid: &str,
-    ) -> Result<UnlockHintResponse> {
+    /// buy one hint. answers the hint, now carrying its text.
+    pub async fn unlock_hint(&self, task_slug: &str, hint_id: &str) -> Result<TaskHint> {
         let headers = self.auth_headers()?;
-        let endpoint = format!("tasks/{}/hints/{}/unlock", task_slug, hint_uuid);
+        let endpoint = format!("tasks/{}/hints/{}/unlock", task_slug, hint_id);
         // post with empty body
-        self.post::<UnlockHintResponse, _>(&endpoint, &serde_json::json!({}), Some(headers))
+        self.post::<TaskHint, _>(&endpoint, &serde_json::json!({}), Some(headers))
             .await
     }
 
-    /// submit an answer for a task (by slug or uuid)
-    pub async fn submit_answer(
-        &self,
-        task_identifier: &str,
-        request: &SubmitAnswerRequest,
-    ) -> Result<SubmitAnswerResponse> {
-        let headers = self.auth_headers()?;
-        let endpoint = format!("tasks/{}/submit", task_identifier);
-        self.post::<SubmitAnswerResponse, _>(&endpoint, request, Some(headers))
-            .await
-    }
-
-    /// fetch available terminals (discovery list, no test_files/blueprint)
-    pub async fn terminals(&self) -> Result<Vec<Terminal>> {
-        let headers = self.auth_headers()?;
-        self.get::<Vec<Terminal>>("terminals", None, Some(headers))
-            .await
-    }
-
-    /// fetch a terminal by slug (includes test_files + blueprint)
-    pub async fn terminal_by_slug(&self, slug: &str) -> Result<Terminal> {
-        let headers = self.auth_headers()?;
-        let endpoint = format!("terminals/{}", slug);
-        self.get::<Terminal>(&endpoint, None, Some(headers)).await
-    }
-
-    /// restart a project from scratch (creates new attempt group)
-    pub async fn restart_project(&self, slug: &str) -> Result<RestartProjectResponse> {
+    /// restart a project from scratch. nothing is deleted: the run number goes
+    /// up and every earlier attempt stays in the log.
+    pub async fn restart_project(&self, slug: &str) -> Result<RestartProjectData> {
         let headers = self.auth_headers()?;
         let endpoint = format!("projects/{}/restart", slug);
-        self.post::<RestartProjectResponse, _>(&endpoint, &serde_json::json!({}), Some(headers))
+        self.post::<RestartProjectData, _>(&endpoint, &serde_json::json!({}), Some(headers))
             .await
     }
 }

@@ -1,7 +1,7 @@
 use colored::Colorize;
 use termimad::MadSkin;
 
-use crate::api::{PaginatedResponse, Project, Task, TaskStatus, Terminal};
+use crate::api::{PaginatedResponse, Project, Task, TaskStatus};
 use crate::state::ActiveProject;
 use crate::tasks::{TestCase, TestResults};
 
@@ -40,7 +40,7 @@ impl Message {
 
     pub fn print_projects(response: &PaginatedResponse<Project>) {
         println!();
-        for (i, project) in response.data.iter().enumerate() {
+        for (i, project) in response.items.iter().enumerate() {
             Self::print_project(project, i);
         }
     }
@@ -81,7 +81,7 @@ impl Message {
                 let connector = if is_last { "└" } else { "├" };
                 let line_char = if is_last { " " } else { "│" };
 
-                let status_marker = match task.status {
+                let status_marker = match task.status() {
                     TaskStatus::ChallengeCompleted => format!(" {}", SYM_PASS).green().to_string(),
                     TaskStatus::ChallengeFailed => format!(" {}", SYM_FAIL).red().to_string(),
                     _ => String::new(),
@@ -91,7 +91,7 @@ impl Message {
                     "    {}── {} {}  {}",
                     connector.dimmed(),
                     task.title.bold(),
-                    task.scores.dimmed(),
+                    task.scores().dimmed(),
                     status_marker
                 );
 
@@ -105,46 +105,15 @@ impl Message {
                 println!("  {} {}", "next up:".dimmed(), first_task.title.bold());
                 println!();
 
-                let skin = MadSkin::default();
-                let rendered = format!("{}", skin.text(&first_task.description, None));
-                for line in rendered.lines() {
-                    println!("    {}", line);
+                // a project listing carries no briefs; `task show` fetches one.
+                if !first_task.description().is_empty() {
+                    let skin = MadSkin::default();
+                    let rendered = format!("{}", skin.text(first_task.description(), None));
+                    for line in rendered.lines() {
+                        println!("    {}", line);
+                    }
                 }
             }
-        }
-    }
-
-    pub fn print_terminals(terminals: &[Terminal]) {
-        if terminals.is_empty() {
-            println!("no terminals available");
-            return;
-        }
-
-        println!();
-        for (i, terminal) in terminals.iter().enumerate() {
-            println!(
-                "{}. {} {}",
-                i,
-                terminal.name.bold(),
-                format!("/{}", terminal.slug).dimmed()
-            );
-            if let Some(tier) = Some(&terminal.tier) {
-                println!("   {}", tier.dimmed());
-            }
-            println!();
-        }
-    }
-
-    pub fn print_terminal_detail(terminal: &Terminal) {
-        println!("  {} {}", "#".dimmed(), terminal.name.bold());
-        println!("    {} {}", "slug:".dimmed(), terminal.slug.dimmed());
-        println!("    {} {}", "tier:".dimmed(), terminal.tier.dimmed());
-
-        if terminal.has_blueprint() {
-            println!("    {} yes", "blueprint:".dimmed());
-        }
-        if terminal.has_test_files() {
-            println!("    {} yes", "test files:".dimmed());
         }
     }
 
@@ -153,7 +122,7 @@ impl Message {
 
         if detailed {
             let skin = MadSkin::default();
-            let rendered = format!("{}", skin.text(&task.description, None));
+            let rendered = format!("{}", skin.text(task.description(), None));
             for line in rendered.lines() {
                 println!("    {}", line);
             }
@@ -166,7 +135,7 @@ impl Message {
         if detailed {
             println!();
             let skin = MadSkin::default();
-            let rendered = format!("{}", skin.text(&task.description, None));
+            let rendered = format!("{}", skin.text(task.description(), None));
             for line in rendered.lines() {
                 println!("  {}", line);
             }

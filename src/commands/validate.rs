@@ -36,16 +36,16 @@ pub fn filter_tasks_for_validation<'a>(
     let mut skipped_paid = 0;
 
     for task in tasks {
-        let is_completed = task.status.is_completed();
+        let is_completed = task.status().is_completed();
 
         // payment lock takes priority (requires subscription)
-        if task.is_paid {
+        if task.is_paid() {
             skipped_paid += 1;
             continue;
         }
 
         // sequential lock (previous task not done)
-        if task.is_locked {
+        if task.is_locked() {
             skipped_locked += 1;
             continue;
         }
@@ -128,19 +128,15 @@ pub async fn validate_all(include_passed: bool, detailed: bool) -> Result<()> {
 
     let completed_slugs: HashSet<String> = tasks
         .iter()
-        .filter(|t| t.status.is_completed())
+        .filter(|t| t.status().is_completed())
         .map(|t| t.slug.clone())
         .collect();
 
     // run each task
     for (i, task) in filtered.to_run.iter().enumerate() {
-        // blueprint tasks have 0 legacy validators; count doesn't affect separator display
-        let validator_count = if task.has_blueprint() {
-            0
-        } else {
-            task.validators.len()
-        };
-        let ui = RunUI::new(&task.slug, validator_count);
+        // the blueprint carries its own step count; the separator does not
+        // need one up front.
+        let ui = RunUI::new(&task.slug, 0);
         println!();
         ui.task_separator(i + 1, total_tasks, &task.slug);
 
@@ -152,6 +148,7 @@ pub async fn validate_all(include_passed: bool, detailed: bool) -> Result<()> {
         run_task_validators(
             &client,
             &project.slug,
+            project.blueprint_source(),
             task,
             Some((&mut state, &token)),
             workspace,
@@ -189,7 +186,7 @@ pub async fn validate_all(include_passed: bool, detailed: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{TaskInputType, TaskStatus};
+    use crate::api::{TaskInputType, TaskProgress, TaskStatus};
 
     fn make_task(id: i32, slug: &str, status: TaskStatus, is_locked: bool) -> Task {
         make_task_full(id, slug, status, is_locked, false)
@@ -207,26 +204,59 @@ mod tests {
         is_paid: bool,
     ) -> Task {
         Task {
-            id,
-            uuid: String::new(),
+            id: format!("00000000-0000-0000-0000-{:012}", id),
             slug: slug.to_string(),
             title: format!("Task {}", id),
-            description: "Test task".to_string(),
+            description: Some("Test task".to_string()),
             sort_order: id,
             input_type: TaskInputType::None,
-            scores: "10:20:50".to_string(),
-            status,
+            scores: Some("10:20:50".to_string()),
+            points: 50,
             is_free: false,
-            is_locked,
-            is_paid,
             abandoned_deduction: 5,
-            points_earned: 0,
             hints: vec![],
-            validators: vec![],
-            blueprint: None,
+            progress: Some(TaskProgress {
+                status,
+                is_locked,
+                is_paid,
+                ..TaskProgress::default()
+            }),
             prologue: vec![],
             epilogue: vec![],
         }
+    }
+
+    /// The same task as an anonymous caller sees it: no `progress` at all.
+    /// Neither lock is claimed, because the api has not decided either.
+    fn make_signed_out_task(slug: &str) -> Task {
+        Task {
+            id: "99999999-9999-9999-9999-999999999999".to_string(),
+            slug: slug.to_string(),
+            title: "Signed out".to_string(),
+            description: None,
+            sort_order: 1,
+            input_type: TaskInputType::None,
+            scores: None,
+            points: 50,
+            is_free: true,
+            abandoned_deduction: 5,
+            hints: vec![],
+            progress: None,
+            prologue: vec![],
+            epilogue: vec![],
+        }
+    }
+
+    #[test]
+    fn test_filter_runs_a_task_with_no_progress() {
+        let tasks = vec![make_signed_out_task("task-1")];
+
+        let result = filter_tasks_for_validation(&tasks, false);
+
+        assert_eq!(result.to_run.len(), 1);
+        assert_eq!(result.skipped_locked, 0);
+        assert_eq!(result.skipped_paid, 0);
+        assert_eq!(result.skipped_completed, 0);
     }
 
     #[test]
@@ -333,9 +363,13 @@ mod tests {
     #[test]
     fn test_filter_paid_takes_priority_over_locked() {
         // task that is both paid AND locked should be counted as paid (payment takes priority)
-        let mut task = make_paid_task(1, "task-1", TaskStatus::ChallengeAwaits);
-        task.is_locked = true;
-        let tasks = vec![task];
+        let tasks = vec![make_task_full(
+            1,
+            "task-1",
+            TaskStatus::ChallengeAwaits,
+            true,
+            true,
+        )];
 
         let result = filter_tasks_for_validation(&tasks, false);
 

@@ -10,6 +10,5 @@ pub mod run;
 pub mod sync;
 pub mod task;
 pub mod tasks;
-pub mod terminal;
 pub mod upgrade;
 pub mod validate;

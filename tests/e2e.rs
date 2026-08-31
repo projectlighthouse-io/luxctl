@@ -195,8 +195,8 @@ fn e2e_project_lifecycle() {
         &[
             "project",
             "start",
-            "--slug",
-            "1brc",
+            "--id",
+            "1-billion-row-challenge",
             "--workspace",
             "/tmp/luxctl-e2e-workspace",
         ],
@@ -211,7 +211,7 @@ fn e2e_project_lifecycle() {
 
     if output.status.success() {
         assert!(
-            out.contains("now working on") || out.contains("1brc"),
+            out.contains("now working on") || out.contains("1 Billion Row Challenge"),
             "expected confirmation, got: {}",
             out
         );
@@ -225,7 +225,7 @@ fn e2e_project_lifecycle() {
         );
         let out = stdout(&output);
         assert!(
-            out.contains("1brc") || out.contains("active"),
+            out.contains("1-billion-row-challenge") || out.contains("active"),
             "expected active project info, got: {}",
             out
         );
@@ -273,8 +273,8 @@ fn e2e_task_show() {
         &[
             "project",
             "start",
-            "--slug",
-            "1brc",
+            "--id",
+            "1-billion-row-challenge",
             "--workspace",
             "/tmp/luxctl-e2e-workspace",
         ],

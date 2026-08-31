@@ -1,12 +1,16 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::LIGHTHOUSE_URL;
 
+/// a refusal from the api.
+///
+/// `code` is stable wire text and safe to branch on; `error` is english prose
+/// and only a fallback. see the api's `projects/refusal.rs`.
 #[derive(Debug, Deserialize)]
 pub struct ApiError {
-    pub message: String,
+    #[serde(default)]
+    pub code: String,
+    pub error: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -14,38 +18,23 @@ pub struct HealthCheckResponse {
     pub status: String,
     pub app: Option<String>,
     pub version: Option<String>,
-    pub environment: Option<String>,
 }
 
+/// a page of results.
+///
+/// four fields, and no `links`: the api never built absolute urls for a client
+/// that already knows its own base url, and every caller here pages by number.
 #[derive(Debug, Deserialize)]
 pub struct PaginatedResponse<T> {
-    pub data: Vec<T>,
-    pub links: PaginationLinks,
-    pub meta: PaginationMeta,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PaginationLinks {
-    pub first: Option<String>,
-    pub last: Option<String>,
-    pub prev: Option<String>,
-    pub next: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PaginationMeta {
-    pub current_page: i32,
-    pub from: Option<i32>,
-    pub last_page: i32,
-    pub path: String,
-    pub per_page: i32,
-    pub to: Option<i32>,
-    pub total: i32,
+    pub items: Vec<T>,
+    pub page: i64,
+    pub per_page: i64,
+    pub total: i64,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ApiUser {
-    pub id: i32,
+    pub id: i64,
     pub name: String,
     pub email: String,
     #[serde(default)]
@@ -54,41 +43,74 @@ pub struct ApiUser {
 
 #[derive(Debug, Deserialize)]
 pub struct UserStats {
-    pub projects_attempted: i32,
-    pub tasks_completed: i32,
-    pub total_xp: i32,
+    pub projects_attempted: i64,
+    pub tasks_completed: i64,
+    pub total_xp: i64,
 }
 
+/// how a project's tasks unlock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnlockMode {
+    /// every task is available from the start.
+    #[default]
+    Open,
+    /// a task opens when the one before it is complete.
+    Sequential,
+}
+
+/// a bullet point beside the project's pitch.
 #[derive(Debug, Deserialize)]
-pub struct ProjectStats {
-    pub attempted_count: i32,
-    pub succeed_count: i32,
-    pub failed_count: i32,
+pub struct Feature {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Project {
-    pub id: i32,
-    #[serde(default)]
-    pub uuid: String,
+    /// a uuid the content repo mints. the integer primary keys are gone.
+    pub id: String,
     pub slug: String,
     pub name: String,
     #[serde(default)]
+    pub headline: Option<String>,
+    #[serde(default)]
     pub short_description: Option<String>,
     #[serde(default)]
-    pub is_published: Option<bool>,
+    pub long_description: Option<String>,
     #[serde(default)]
-    pub is_featured: Option<bool>,
-    #[serde(default)]
-    pub show_tasks: Option<bool>,
-    #[serde(default)]
-    pub stats: Option<ProjectStats>,
-    #[serde(default)]
-    pub published_at: Option<String>,
-    #[serde(default)]
-    pub tasks_count: Option<i32>,
+    pub difficulty: Option<String>,
     #[serde(default)]
     pub runner_image: Option<String>,
+    #[serde(default)]
+    pub is_challenge: bool,
+    #[serde(default)]
+    pub is_featured: bool,
+    #[serde(default)]
+    pub featured_order: i16,
+    #[serde(default)]
+    pub show_tasks: bool,
+    #[serde(default)]
+    pub unlock_mode: UnlockMode,
+    #[serde(default)]
+    pub related_book_slug: Option<String>,
+    #[serde(default)]
+    pub task_count: usize,
+    #[serde(default)]
+    pub features: Vec<Feature>,
+    /// the project's long-form markdown. only on the detail response.
+    #[serde(default)]
+    pub overview: Option<String>,
+    /// the `.bp` source, whole.
+    ///
+    /// **one per project, not one per task.** the old api stored a copy of
+    /// this on every task row and served it there; it is read once here, and
+    /// every task of the project runs against it.
+    #[serde(default)]
+    pub blueprint: Option<String>,
     #[serde(default)]
     pub tasks: Option<Vec<Task>>,
 }
@@ -97,77 +119,31 @@ impl Project {
     pub fn url(&self) -> String {
         format!("{}/projects/{}", LIGHTHOUSE_URL, self.slug)
     }
-}
 
-fn default_tier() -> String {
-    "seeker".to_string()
-}
+    /// the blueprint source, or an empty string when the project carries none.
+    pub fn blueprint_source(&self) -> &str {
+        self.blueprint.as_deref().unwrap_or_default()
+    }
 
-/// terminal data (single-file DSA challenges like LRU Cache).
-/// unlike projects (multi-task), terminals have one blueprint and test_files
-/// that are injected at validation time.
-#[derive(Debug, Deserialize)]
-pub struct Terminal {
-    pub id: i32,
-    pub slug: String,
-    pub name: String,
-    #[serde(default = "default_tier")]
-    pub tier: String,
-    #[serde(default)]
-    pub blueprint: Option<String>,
-    /// nested map: language → (filename → content).
-    /// caller picks a language key to get the flat file map for injection.
-    #[serde(default)]
-    pub test_files: Option<HashMap<String, HashMap<String, String>>>,
-    #[serde(default)]
-    pub languages: Option<Vec<String>>,
-    #[serde(default)]
-    pub run_commands: Option<HashMap<String, String>>,
-}
-
-impl Terminal {
     pub fn has_blueprint(&self) -> bool {
         self.blueprint.as_ref().is_some_and(|s| !s.is_empty())
     }
-
-    pub fn has_test_files(&self) -> bool {
-        self.test_files.as_ref().is_some_and(|m| !m.is_empty())
-    }
-
-    /// extract test files for a specific language, falling back to first available
-    pub fn test_files_for_lang(&self, lang: Option<&str>) -> HashMap<String, String> {
-        let Some(all) = &self.test_files else {
-            return HashMap::new();
-        };
-
-        if let Some(lang) = lang {
-            if let Some(files) = all.get(lang) {
-                return files.clone();
-            }
-        }
-
-        // fall back to first language that has files
-        all.values().next().cloned().unwrap_or_default()
-    }
 }
 
-/// task input type (matches Laravel TaskInputType enum)
+/// task input type — whether the task expects a typed answer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskInputType {
     #[default]
     None,
     Text,
-    Number,
-    Select,
-    Code,
-    MultiSelect,
 }
 
-/// task progress status (matches Laravel TaskStatus enum)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// where a reader stands on a task.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
+    #[default]
     ChallengeAwaits,
     Challenged,
     ChallengeCompleted,
@@ -181,37 +157,62 @@ impl TaskStatus {
     }
 }
 
+/// what this reader has done with one task.
+///
+/// absent for an anonymous caller, which is a different statement from a row
+/// of zeroes: signed out means "no progress", not "no attempts". everything
+/// reads it through [`Task`]'s accessors, which default it.
+#[derive(Debug, Default, Deserialize)]
+pub struct TaskProgress {
+    #[serde(default)]
+    pub status: TaskStatus,
+    #[serde(default)]
+    pub attempts: i64,
+    #[serde(default)]
+    pub points_earned: i32,
+    /// sequential lock: the task before this one is not done.
+    #[serde(default)]
+    pub is_locked: bool,
+    /// paywall: the task is not free and the reader does not hold the book.
+    #[serde(default)]
+    pub is_paid: bool,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Task {
-    pub id: i32,
-    #[serde(default)]
-    pub uuid: String,
+    /// a uuid, minted in the content repo.
+    pub id: String,
     pub slug: String,
     pub title: String,
-    pub description: String,
+    /// the brief, as markdown. absent in a listing, and absent for a phase
+    /// that carried no description.
+    #[serde(default)]
+    pub description: Option<String>,
     pub sort_order: i32,
     #[serde(default)]
     pub input_type: TaskInputType,
-    pub scores: String,
-    pub status: TaskStatus,
+    /// the scoring ladder, verbatim — `5:10:25|10:20:15`.
+    #[serde(default)]
+    pub scores: Option<String>,
+    #[serde(default)]
+    pub points: i32,
     #[serde(default)]
     pub is_free: bool,
-    /// sequential lock: previous task not completed
-    pub is_locked: bool,
-    /// payment lock: task is not free AND user doesn't have lab subscription
     #[serde(default)]
-    pub is_paid: bool,
     pub abandoned_deduction: i32,
-    pub points_earned: i32,
-    pub hints: Vec<Hint>,
-    pub validators: Vec<String>,
-    /// blueprint source text (.bp DSL) — if present, used instead of validators
     #[serde(default)]
-    pub blueprint: Option<String>,
-    /// commands to run before validators (e.g., docker compose up)
+    pub hints: Vec<Hint>,
+    /// absent for an anonymous caller.
+    #[serde(default)]
+    pub progress: Option<TaskProgress>,
+    /// commands run before and after the blueprint. the api has no field for
+    /// either any more; kept so a response that grows one still parses.
     #[serde(default)]
     pub prologue: Vec<String>,
-    /// commands to run after validators (e.g., docker compose down)
     #[serde(default)]
     pub epilogue: Vec<String>,
 }
@@ -222,63 +223,74 @@ impl Task {
         self.input_type != TaskInputType::None
     }
 
-    pub fn has_blueprint(&self) -> bool {
-        self.blueprint.as_ref().is_some_and(|s| !s.is_empty())
+    pub fn description(&self) -> &str {
+        self.description.as_deref().unwrap_or_default()
+    }
+
+    pub fn scores(&self) -> &str {
+        self.scores.as_deref().unwrap_or_default()
+    }
+
+    /// this reader's standing, or the untouched one for a signed-out caller.
+    pub fn status(&self) -> TaskStatus {
+        self.progress
+            .as_ref()
+            .map_or(TaskStatus::ChallengeAwaits, |p| p.status)
+    }
+
+    pub fn points_earned(&self) -> i32 {
+        self.progress.as_ref().map_or(0, |p| p.points_earned)
+    }
+
+    /// both locks are false without progress: a signed-out reader is not told
+    /// a task is locked, because the api has not decided that it is.
+    pub fn is_locked(&self) -> bool {
+        self.progress.as_ref().is_some_and(|p| p.is_locked)
+    }
+
+    pub fn is_paid(&self) -> bool {
+        self.progress.as_ref().is_some_and(|p| p.is_paid)
     }
 }
 
+/// a hint on a project or task listing: that one exists, what it costs, and
+/// whether it is open yet. never its words.
 #[derive(Debug, Deserialize)]
 pub struct Hint {
-    pub id: i32,
+    pub id: String,
     #[serde(default)]
-    pub uuid: String,
-    pub text: String,
-    pub unlock_criteria: String,
+    pub sort_order: usize,
     pub points_deduction: i32,
-}
-
-/// hint data from the hints API (includes unlock status)
-#[derive(Debug, Deserialize)]
-pub struct TaskHint {
-    pub id: i32,
-    pub uuid: String,
-    pub text: Option<String>, // only present if unlocked
-    pub points_deduction: i32,
-    pub sort_order: i32,
-    pub is_unlocked: bool,
+    #[serde(default)]
     pub is_available: bool,
 }
 
-/// response wrapper for hints list
+/// a hint from the hints endpoint: the summary, plus what this reader holds.
+///
+/// `text` is absent rather than null when the hint is not theirs, so a client
+/// cannot print an empty hint by forgetting to check a flag.
 #[derive(Debug, Deserialize)]
-pub struct HintsResponse {
-    pub data: Vec<TaskHint>,
-}
-
-/// response from unlocking a hint
-#[derive(Debug, Deserialize)]
-pub struct UnlockHintResponse {
-    pub data: UnlockedHintData,
-    pub unlocked_at: String,
-    pub points_deducted: i32,
-    pub message: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UnlockedHintData {
-    pub id: i32,
-    pub uuid: String,
-    pub text: String,
+pub struct TaskHint {
+    pub id: String,
+    #[serde(default)]
+    pub sort_order: usize,
     pub points_deduction: i32,
+    #[serde(default)]
+    pub is_available: bool,
+    #[serde(default)]
+    pub is_unlocked: bool,
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 /// outcome values for task attempts
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskOutcome {
     Attempted,
     Passed,
     Failed,
+    Abandoned,
 }
 
 impl std::fmt::Display for TaskOutcome {
@@ -287,95 +299,50 @@ impl std::fmt::Display for TaskOutcome {
             TaskOutcome::Attempted => write!(f, "attempted"),
             TaskOutcome::Passed => write!(f, "passed"),
             TaskOutcome::Failed => write!(f, "failed"),
+            TaskOutcome::Abandoned => write!(f, "abandoned"),
         }
     }
 }
 
-/// request body for submitting a task attempt
+/// request body for submitting a task attempt.
+///
+/// no `points_achieved` and no `run`: the api works both out from its own log,
+/// and ignores anything a client says about them.
 #[derive(Debug, Serialize)]
 pub struct SubmitAttemptRequest {
     pub project_slug: String,
-    pub task_id: i32,
+    pub task_id: String,
     pub task_outcome: TaskOutcome,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub points_achieved: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_outcome_context: Option<String>,
 }
 
-/// response from submitting a task attempt
-#[derive(Debug, Deserialize)]
-pub struct SubmitAttemptResponse {
-    pub message: String,
-    pub data: AttemptData,
-}
-
+/// what comes back from recording an attempt.
 #[derive(Debug, Deserialize)]
 pub struct AttemptData {
-    pub id: i32,
-    pub task_id: i32,
-    pub project_id: i32,
-    pub task_outcome: String,
+    pub id: i64,
+    pub task_id: String,
+    /// which run of the project this attempt was made in.
+    pub run: i16,
+    pub outcome: TaskOutcome,
     pub points_achieved: i32,
     pub is_reattempt: bool,
-    pub created_at: String,
-}
-
-/// request body for submitting a task answer
-#[derive(Debug, Serialize)]
-pub struct SubmitAnswerRequest {
-    pub answer: serde_json::Value,
-}
-
-impl SubmitAnswerRequest {
-    pub fn text(answer: &str) -> Self {
-        Self {
-            answer: serde_json::Value::String(answer.to_string()),
-        }
-    }
-
-    pub fn number(answer: f64) -> Self {
-        Self {
-            answer: serde_json::json!(answer),
-        }
-    }
-
-    pub fn choices(answers: Vec<&str>) -> Self {
-        Self {
-            answer: serde_json::json!(answers),
-        }
-    }
-}
-
-/// response from submitting a task answer
-#[derive(Debug, Deserialize)]
-pub struct SubmitAnswerResponse {
-    pub success: bool,
-    pub valid: bool,
-    pub message: String,
     #[serde(default)]
-    pub points_earned: Option<i32>,
-    #[serde(default)]
-    pub attempts: Option<i32>,
-    #[serde(default)]
-    pub already_completed: Option<bool>,
+    pub created_at: Option<String>,
 }
 
-/// response from restarting a lab
-#[derive(Debug, Deserialize)]
-pub struct RestartProjectResponse {
-    pub message: String,
-    pub data: RestartProjectData,
-}
-
+/// what comes back from restarting a project.
 #[derive(Debug, Deserialize)]
 pub struct RestartProjectData {
-    pub attempt_group_id: i32,
-    pub created_at: String,
+    /// the run the reader is now on. replaces the old `attempt_group_id`,
+    /// which was a row id the client had no use for.
+    pub run: i16,
+    #[serde(default)]
+    pub restarted_at: Option<String>,
 }
 
 impl ApiUser {
-    pub fn id(&self) -> i32 {
+    pub fn id(&self) -> i64 {
         self.id
     }
 
@@ -404,469 +371,233 @@ mod tests {
     #[test]
     fn test_project_deserialize() {
         let json = r#"{
-            "id": 2,
+            "id": "8053a849-9423-4a89-8e90-b343bdaea79d",
             "slug": "build-your-own-http-server",
             "name": "Build Your Own Server",
+            "headline": "Your First HTTP Server",
             "short_description": "Learn the fundamentals of web servers.",
-            "is_published": true,
-            "is_featured": false,
+            "difficulty": "intermediate",
+            "runner_image": "local|go|rust|c",
+            "is_challenge": false,
+            "is_featured": true,
+            "featured_order": 2,
             "show_tasks": true,
-            "stats": {
-                "attempted_count": 10,
-                "succeed_count": 5,
-                "failed_count": 3
-            },
-            "published_at": "2025-01-15T00:00:00+00:00",
-            "tasks_count": 9
+            "unlock_mode": "sequential",
+            "related_book_slug": "build-your-own-http-server",
+            "task_count": 18
         }"#;
 
         let project: Project = serde_json::from_str(json).unwrap();
 
-        assert_eq!(project.id, 2);
+        assert_eq!(project.id, "8053a849-9423-4a89-8e90-b343bdaea79d");
         assert_eq!(project.slug, "build-your-own-http-server");
-        assert_eq!(project.name, "Build Your Own Server");
-        assert_eq!(project.is_published, Some(true));
-        assert_eq!(project.is_featured, Some(false));
-        assert_eq!(project.show_tasks, Some(true));
-        let stats = project.stats.unwrap();
-        assert_eq!(stats.attempted_count, 10);
-        assert_eq!(stats.succeed_count, 5);
-        assert_eq!(stats.failed_count, 3);
-        assert_eq!(project.tasks_count, Some(9));
+        assert_eq!(project.headline.as_deref(), Some("Your First HTTP Server"));
+        assert_eq!(project.unlock_mode, UnlockMode::Sequential);
+        assert!(project.is_featured);
+        assert!(project.show_tasks);
+        assert_eq!(project.task_count, 18);
+        // a listing carries neither
+        assert!(project.blueprint.is_none());
+        assert!(project.tasks.is_none());
     }
 
     #[test]
-    fn test_project_with_null_published_at() {
+    fn test_project_detail_carries_the_blueprint_once() {
         let json = r#"{
-            "id": 1,
-            "slug": "test-lab",
-            "name": "Test Lab",
-            "short_description": "A test lab",
-            "is_published": false,
-            "is_featured": false,
-            "show_tasks": false,
-            "stats": {
-                "attempted_count": 0,
-                "succeed_count": 0,
-                "failed_count": 0
-            },
-            "published_at": null,
-            "tasks_count": 0
-        }"#;
-
-        let project: Project = serde_json::from_str(json).unwrap();
-
-        assert!(project.published_at.is_none());
-    }
-
-    #[test]
-    fn test_project_detail_with_tasks() {
-        let json = r#"{
-            "id": 1,
+            "id": "8053a849-9423-4a89-8e90-b343bdaea79d",
             "slug": "build-your-own-git",
             "name": "Build Your Own Git",
             "runner_image": "local|go|rust|c",
+            "unlock_mode": "sequential",
+            "task_count": 1,
+            "features": [{"title": "Quick Start", "description": "Three tasks", "icon": "zap"}],
+            "overview": "Start simple.\n",
+            "blueprint": "phase \"listen\" { }",
             "tasks": [
                 {
-                    "id": 1,
+                    "id": "a9dccd78-7d42-476f-a9d1-83517426449f",
                     "slug": "initialize-a-repository",
                     "title": "Initialize a Repository",
-                    "description": "Create the .git directory structure.",
                     "sort_order": 1,
-                    "scores": "5:10:50|10:20:35|20:30:20",
-                    "status": "challenge_awaits",
-                    "is_locked": false,
+                    "scores": "5:10:50|10:20:35",
+                    "points": 50,
+                    "is_free": true,
                     "abandoned_deduction": 5,
-                    "points_earned": 0,
                     "hints": [
                         {
-                            "id": 15,
-                            "text": "Create the .git directory.",
-                            "unlock_criteria": "10:3:A",
-                            "points_deduction": 5
+                            "id": "5e4ebe7d-909c-4d72-814b-7432864e178e",
+                            "sort_order": 0,
+                            "points_deduction": 5,
+                            "is_available": false
                         }
                     ],
-                    "validators": ["can_compile:bool(true)"]
+                    "progress": {
+                        "status": "challenge_completed",
+                        "attempts": 3,
+                        "points_earned": 35,
+                        "is_locked": false,
+                        "is_paid": false,
+                        "started_at": "2026-08-30T10:00:00Z",
+                        "completed_at": "2026-08-30T10:12:00Z"
+                    }
                 }
             ]
         }"#;
 
         let project: Project = serde_json::from_str(json).unwrap();
 
-        assert_eq!(project.id, 1);
-        assert_eq!(project.slug, "build-your-own-git");
-        assert_eq!(project.runner_image, Some("local|go|rust|c".to_string()));
+        assert!(project.has_blueprint());
+        assert_eq!(project.features.len(), 1);
+        assert_eq!(project.overview.as_deref(), Some("Start simple.\n"));
 
         let tasks = project.tasks.unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Initialize a Repository");
-        assert_eq!(tasks[0].status, TaskStatus::ChallengeAwaits);
+        assert_eq!(tasks[0].status(), TaskStatus::ChallengeCompleted);
+        assert_eq!(tasks[0].points_earned(), 35);
         assert_eq!(tasks[0].hints.len(), 1);
-        assert_eq!(tasks[0].hints[0].text, "Create the .git directory.");
+        assert_eq!(tasks[0].hints[0].id, "5e4ebe7d-909c-4d72-814b-7432864e178e");
+    }
+
+    #[test]
+    fn test_task_without_progress_reads_as_untouched() {
+        // what an anonymous caller gets: no `progress` key at all.
+        let json = r#"{
+            "id": "a9dccd78-7d42-476f-a9d1-83517426449f",
+            "slug": "listen-on-port",
+            "title": "Listen on a Port",
+            "sort_order": 1,
+            "points": 25,
+            "abandoned_deduction": 5
+        }"#;
+
+        let task: Task = serde_json::from_str(json).unwrap();
+
+        assert_eq!(task.status(), TaskStatus::ChallengeAwaits);
+        assert_eq!(task.points_earned(), 0);
+        assert!(!task.is_locked());
+        assert!(!task.is_paid());
+        assert_eq!(task.scores(), "");
+        assert_eq!(task.description(), "");
+        assert!(!task.accepts_input());
     }
 
     #[test]
     fn test_paginated_response_deserialize() {
         let json = r#"{
-            "data": [
+            "items": [
                 {
-                    "id": 1,
+                    "id": "11111111-1111-1111-1111-111111111111",
                     "slug": "lab-one",
                     "name": "Lab One",
                     "short_description": "First lab",
-                    "is_published": true,
-                    "is_featured": true,
-                    "show_tasks": true,
-                    "stats": {"attempted_count": 0, "succeed_count": 0, "failed_count": 0},
-                    "published_at": "2025-01-15T00:00:00+00:00",
-                    "tasks_count": 5
+                    "task_count": 5
                 },
                 {
-                    "id": 2,
+                    "id": "22222222-2222-2222-2222-222222222222",
                     "slug": "lab-two",
                     "name": "Lab Two",
                     "short_description": "Second lab",
-                    "is_published": true,
-                    "is_featured": false,
-                    "show_tasks": false,
-                    "stats": {"attempted_count": 1, "succeed_count": 1, "failed_count": 0},
-                    "published_at": null,
-                    "tasks_count": 3
+                    "task_count": 3
                 }
             ],
-            "links": {
-                "first": "http://example.com/api/v1/labs?page=1",
-                "last": "http://example.com/api/v1/labs?page=2",
-                "prev": null,
-                "next": "http://example.com/api/v1/labs?page=2"
-            },
-            "meta": {
-                "current_page": 1,
-                "from": 1,
-                "last_page": 2,
-                "path": "http://example.com/api/v1/labs",
-                "per_page": 15,
-                "to": 15,
-                "total": 21
-            }
+            "page": 1,
+            "per_page": 50,
+            "total": 16
         }"#;
 
         let response: PaginatedResponse<Project> = serde_json::from_str(json).unwrap();
 
-        assert_eq!(response.data.len(), 2);
-        assert_eq!(response.data[0].id, 1);
-        assert_eq!(response.data[0].slug, "lab-one");
-        assert_eq!(response.data[1].id, 2);
-        assert_eq!(response.data[1].slug, "lab-two");
-
-        assert_eq!(
-            response.links.first,
-            Some("http://example.com/api/v1/labs?page=1".to_string())
-        );
-        assert!(response.links.prev.is_none());
-        assert_eq!(
-            response.links.next,
-            Some("http://example.com/api/v1/labs?page=2".to_string())
-        );
-
-        assert_eq!(response.meta.current_page, 1);
-        assert_eq!(response.meta.last_page, 2);
-        assert_eq!(response.meta.per_page, 15);
-        assert_eq!(response.meta.total, 21);
+        assert_eq!(response.items.len(), 2);
+        assert_eq!(response.items[0].slug, "lab-one");
+        assert_eq!(response.items[1].slug, "lab-two");
+        assert_eq!(response.page, 1);
+        assert_eq!(response.per_page, 50);
+        assert_eq!(response.total, 16);
     }
 
     #[test]
-    fn test_paginated_response_empty_data() {
-        let json = r#"{
-            "data": [],
-            "links": {
-                "first": "http://example.com/api/v1/labs?page=1",
-                "last": "http://example.com/api/v1/labs?page=1",
-                "prev": null,
-                "next": null
-            },
-            "meta": {
-                "current_page": 1,
-                "from": null,
-                "last_page": 1,
-                "path": "http://example.com/api/v1/labs",
-                "per_page": 15,
-                "to": null,
-                "total": 0
-            }
-        }"#;
+    fn test_paginated_response_empty_items() {
+        let json = r#"{"items": [], "page": 1, "per_page": 50, "total": 0}"#;
 
         let response: PaginatedResponse<Project> = serde_json::from_str(json).unwrap();
 
-        assert!(response.data.is_empty());
-        assert!(response.meta.from.is_none());
-        assert!(response.meta.to.is_none());
-        assert_eq!(response.meta.total, 0);
+        assert!(response.items.is_empty());
+        assert_eq!(response.total, 0);
     }
 
     #[test]
-    fn test_task_with_prologue_and_epilogue() {
+    fn test_attempt_data_deserialize() {
         let json = r#"{
-            "id": 1,
-            "slug": "api-client-test",
-            "title": "API Client Basics",
-            "description": "Test your API client implementation",
-            "sort_order": 1,
-            "scores": "5:10:50",
-            "status": "challenge_awaits",
-            "is_locked": false,
-            "abandoned_deduction": 5,
-            "points_earned": 0,
-            "hints": [],
-            "validators": ["tcp_listening:int(8080)"],
-            "prologue": ["docker compose up -d", "sleep 2"],
-            "epilogue": ["docker compose down"]
+            "id": 91,
+            "task_id": "a9dccd78-7d42-476f-a9d1-83517426449f",
+            "run": 4,
+            "outcome": "passed",
+            "points_achieved": 100,
+            "is_reattempt": false,
+            "created_at": "2026-08-30T10:12:00Z"
         }"#;
 
-        let task: Task = serde_json::from_str(json).unwrap();
+        let data: AttemptData = serde_json::from_str(json).unwrap();
 
-        assert_eq!(task.prologue.len(), 2);
-        assert_eq!(task.prologue[0], "docker compose up -d");
-        assert_eq!(task.prologue[1], "sleep 2");
-        assert_eq!(task.epilogue.len(), 1);
-        assert_eq!(task.epilogue[0], "docker compose down");
+        assert_eq!(data.run, 4);
+        assert_eq!(data.outcome, TaskOutcome::Passed);
+        assert_eq!(data.points_achieved, 100);
+        assert!(!data.is_reattempt);
     }
 
     #[test]
-    fn test_task_without_prologue_epilogue_defaults_to_empty() {
-        // when prologue/epilogue are not present in JSON, they should default to empty
-        let json = r#"{
-            "id": 1,
-            "slug": "simple-task",
-            "title": "Simple Task",
-            "description": "No hooks",
-            "sort_order": 1,
-            "scores": "5:10:50",
-            "status": "challenge_awaits",
-            "is_locked": false,
-            "abandoned_deduction": 5,
-            "points_earned": 0,
-            "hints": [],
-            "validators": []
-        }"#;
+    fn test_restart_answers_a_run_not_a_group_id() {
+        let json = r#"{"run": 3, "restarted_at": "2026-08-30T10:12:00Z"}"#;
 
-        let task: Task = serde_json::from_str(json).unwrap();
+        let data: RestartProjectData = serde_json::from_str(json).unwrap();
 
-        assert!(task.prologue.is_empty());
-        assert!(task.epilogue.is_empty());
+        assert_eq!(data.run, 3);
     }
 
     #[test]
-    fn test_task_with_input_type() {
-        let json = r#"{
-            "id": 1,
-            "slug": "text-input-task",
-            "title": "Text Input Task",
-            "description": "Enter a text answer",
-            "sort_order": 1,
-            "input_type": "text",
-            "scores": "5:10:50",
-            "status": "challenge_awaits",
-            "is_locked": false,
-            "abandoned_deduction": 5,
-            "points_earned": 0,
-            "hints": [],
-            "validators": []
-        }"#;
+    fn test_submit_attempt_request_carries_no_points_or_run() {
+        let request = SubmitAttemptRequest {
+            project_slug: "p".to_string(),
+            task_id: "a9dccd78-7d42-476f-a9d1-83517426449f".to_string(),
+            task_outcome: TaskOutcome::Passed,
+            task_outcome_context: None,
+        };
 
-        let task: Task = serde_json::from_str(json).unwrap();
-
-        assert_eq!(task.input_type, TaskInputType::Text);
-        assert!(task.accepts_input());
-    }
-
-    #[test]
-    fn test_task_without_input_type_defaults_to_none() {
-        let json = r#"{
-            "id": 1,
-            "slug": "no-input-task",
-            "title": "No Input Task",
-            "description": "No input needed",
-            "sort_order": 1,
-            "scores": "5:10:50",
-            "status": "challenge_awaits",
-            "is_locked": false,
-            "abandoned_deduction": 5,
-            "points_earned": 0,
-            "hints": [],
-            "validators": []
-        }"#;
-
-        let task: Task = serde_json::from_str(json).unwrap();
-
-        assert_eq!(task.input_type, TaskInputType::None);
-        assert!(!task.accepts_input());
-    }
-
-    #[test]
-    fn test_task_has_blueprint() {
-        let json = r#"{
-            "id": 1,
-            "slug": "bp-task",
-            "title": "Blueprint Task",
-            "description": "Uses blueprint",
-            "sort_order": 1,
-            "scores": "5:10:50",
-            "status": "challenge_awaits",
-            "is_locked": false,
-            "abandoned_deduction": 5,
-            "points_earned": 0,
-            "hints": [],
-            "validators": [],
-            "blueprint": "blueprint \"test\" { }"
-        }"#;
-
-        let task: Task = serde_json::from_str(json).unwrap();
-        assert!(task.has_blueprint());
-    }
-
-    #[test]
-    fn test_task_without_blueprint_defaults_to_none() {
-        let json = r#"{
-            "id": 1,
-            "slug": "legacy-task",
-            "title": "Legacy Task",
-            "description": "Uses validators",
-            "sort_order": 1,
-            "scores": "5:10:50",
-            "status": "challenge_awaits",
-            "is_locked": false,
-            "abandoned_deduction": 5,
-            "points_earned": 0,
-            "hints": [],
-            "validators": ["tcp_listening:int(8080)"]
-        }"#;
-
-        let task: Task = serde_json::from_str(json).unwrap();
-        assert!(!task.has_blueprint());
-        assert!(task.blueprint.is_none());
-    }
-
-    #[test]
-    fn test_submit_answer_request_text() {
-        let request = SubmitAnswerRequest::text("my answer");
         let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("my answer"));
+
+        assert!(json.contains("\"task_outcome\":\"passed\""));
+        assert!(json.contains("a9dccd78-7d42-476f-a9d1-83517426449f"));
+        assert!(!json.contains("points_achieved"));
+        assert!(!json.contains("\"run\""));
+        // an absent context is dropped rather than sent as null
+        assert!(!json.contains("task_outcome_context"));
     }
 
     #[test]
-    fn test_submit_answer_request_number() {
-        let request = SubmitAnswerRequest::number(42.0);
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("42"));
-    }
-
-    #[test]
-    fn test_submit_answer_request_choices() {
-        let request = SubmitAnswerRequest::choices(vec!["a", "b"]);
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("[\"a\",\"b\"]"));
-    }
-
-    #[test]
-    fn test_submit_answer_response_deserialize() {
+    fn test_locked_hint_carries_no_text() {
         let json = r#"{
-            "success": true,
-            "valid": true,
-            "message": "Correct!",
-            "points_earned": 50,
-            "attempts": 2
+            "id": "5e4ebe7d-909c-4d72-814b-7432864e178e",
+            "sort_order": 0,
+            "points_deduction": 5,
+            "is_available": true,
+            "is_unlocked": false
         }"#;
 
-        let response: SubmitAnswerResponse = serde_json::from_str(json).unwrap();
+        let hint: TaskHint = serde_json::from_str(json).unwrap();
 
-        assert!(response.success);
-        assert!(response.valid);
-        assert_eq!(response.message, "Correct!");
-        assert_eq!(response.points_earned, Some(50));
-        assert_eq!(response.attempts, Some(2));
+        assert!(hint.is_available);
+        assert!(!hint.is_unlocked);
+        assert!(hint.text.is_none());
     }
 
     #[test]
-    fn test_submit_answer_response_incorrect() {
-        let json = r#"{
-            "success": true,
-            "valid": false,
-            "message": "Incorrect answer.",
-            "attempts": 3
-        }"#;
+    fn test_api_error_reads_the_code_and_the_prose() {
+        let json = r#"{"code": "task_locked", "error": "Finish the task before this one first."}"#;
 
-        let response: SubmitAnswerResponse = serde_json::from_str(json).unwrap();
+        let error: ApiError = serde_json::from_str(json).unwrap();
 
-        assert!(response.success);
-        assert!(!response.valid);
-        assert_eq!(response.message, "Incorrect answer.");
-        assert!(response.points_earned.is_none());
-        assert_eq!(response.attempts, Some(3));
-    }
-
-    #[test]
-    fn test_terminal_deserialize() {
-        let json = r#"{
-            "id": 1,
-            "slug": "lru-cache",
-            "name": "LRU Cache",
-            "tier": "seeker",
-            "blueprint": "blueprint \"LRU Cache\" { }",
-            "test_files": {
-                "go": {
-                    "lru_cache_test.go": "package lru_cache\nimport \"testing\"\n"
-                }
-            },
-            "languages": ["go", "rust"],
-            "run_commands": {
-                "go": "cd /workspace && go test -v ./..."
-            }
-        }"#;
-
-        let terminal: Terminal = serde_json::from_str(json).unwrap();
-
-        assert_eq!(terminal.id, 1);
-        assert_eq!(terminal.slug, "lru-cache");
-        assert_eq!(terminal.name, "LRU Cache");
-        assert_eq!(terminal.tier, "seeker");
-        assert!(terminal.has_blueprint());
-        assert!(terminal.has_test_files());
-
-        let go_files = terminal.test_files_for_lang(Some("go"));
-        assert_eq!(go_files.len(), 1);
-        assert!(go_files.contains_key("lru_cache_test.go"));
-
-        assert_eq!(terminal.languages.as_ref().unwrap().len(), 2);
-        assert!(terminal.run_commands.as_ref().unwrap().contains_key("go"));
-    }
-
-    #[test]
-    fn test_terminal_without_optional_fields() {
-        let json = r#"{
-            "id": 2,
-            "slug": "binary-search",
-            "name": "Binary Search"
-        }"#;
-
-        let terminal: Terminal = serde_json::from_str(json).unwrap();
-
-        assert_eq!(terminal.slug, "binary-search");
-        assert_eq!(terminal.tier, "seeker");
-        assert!(!terminal.has_blueprint());
-        assert!(!terminal.has_test_files());
-    }
-
-    #[test]
-    fn test_terminal_voyage_tier() {
-        let json = r#"{
-            "id": 3,
-            "slug": "http-server",
-            "name": "HTTP Server",
-            "tier": "voyage"
-        }"#;
-
-        let terminal: Terminal = serde_json::from_str(json).unwrap();
-        assert_eq!(terminal.tier, "voyage");
+        assert_eq!(error.code, "task_locked");
+        assert_eq!(error.error, "Finish the task before this one first.");
     }
 }

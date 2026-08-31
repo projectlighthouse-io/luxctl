@@ -3,7 +3,7 @@ members = [".", "crates/blueprint"]
 
 [package]
 name = "luxctl"
-version = "0.14.2"
+version = "0.15.0"
 edition = "2021"
 description = "Learn by building - CLI for projectlighthouse.io"
 license = "AGPL-3.0-only"

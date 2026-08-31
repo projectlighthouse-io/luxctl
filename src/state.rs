@@ -18,7 +18,8 @@ type HmacSha256 = Hmac<Sha256>;
 /// task data cached for offline access and integrity protection
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedTask {
-    pub id: i32,
+    /// a uuid. the integer ids are gone — see `api::types`.
+    pub id: String,
     pub slug: String,
     pub title: String,
     pub points: i32,
@@ -26,7 +27,6 @@ pub struct CachedTask {
     pub points_earned: i32,
     pub status: TaskStatus,
     pub sort_order: i32,
-    pub validators: Vec<String>,
 }
 
 impl CachedTask {
@@ -34,22 +34,21 @@ impl CachedTask {
     pub fn from_api_task(task: &Task) -> Self {
         // scores format: "attempts:minutes:points|..." - take max points from first tier
         let points = task
-            .scores
+            .scores()
             .split('|')
             .next()
             .and_then(|tier| tier.split(':').nth(2))
             .and_then(|p| p.parse().ok())
-            .unwrap_or(0);
+            .unwrap_or(task.points);
 
         CachedTask {
-            id: task.id,
+            id: task.id.clone(),
             slug: task.slug.clone(),
             title: task.title.clone(),
             points,
-            points_earned: task.points_earned,
-            status: task.status,
+            points_earned: task.points_earned(),
+            status: task.status(),
             sort_order: task.sort_order,
-            validators: task.validators.clone(),
         }
     }
 }
@@ -121,8 +120,20 @@ impl ProjectState {
         let content = fs::read_to_string(&path)
             .map_err(|e| eyre::eyre!("failed to read state file: {}", e))?;
 
-        let state_file: StateFile = serde_json::from_str(&content)
-            .map_err(|e| eyre::eyre!("failed to parse state file: {}", e))?;
+        // A state file written by an older luxctl holds integer task ids. It
+        // cannot be read, and erroring here would break every command until
+        // the reader found the file and deleted it — so it is cleared and
+        // re-fetched, exactly as a checksum mismatch is.
+        let Some(state_file) = serde_json::from_str::<StateFile>(&content)
+            .inspect_err(|e| {
+                log::warn!("state file is from an older luxctl ({e}), clearing state");
+            })
+            .ok()
+        else {
+            let empty = ProjectState::new();
+            empty.save(token)?;
+            return Ok(empty);
+        };
 
         // verify checksum
         let expected = Self::compute_checksum(&state_file.active_project, token);
@@ -222,7 +233,7 @@ impl ProjectState {
     }
 
     /// update a single task's status (e.g., after successful submission)
-    pub fn update_task_status(&mut self, task_id: i32, new_status: TaskStatus) {
+    pub fn update_task_status(&mut self, task_id: &str, new_status: TaskStatus) {
         self.with_active_mut(|l| {
             if let Some(task) = l.tasks.iter_mut().find(|t| t.id == task_id) {
                 task.status = new_status;
@@ -277,7 +288,7 @@ impl Default for ProjectState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::TaskInputType;
+    use crate::api::{TaskInputType, TaskProgress};
 
     fn test_token() -> &'static str {
         "test-secret-token-123"
@@ -286,34 +297,61 @@ mod tests {
     #[test]
     fn test_cached_task_from_api_task() {
         let api_task = Task {
-            id: 1,
-            uuid: String::new(),
+            id: "a9dccd78-7d42-476f-a9d1-83517426449f".to_string(),
             slug: "test-task".to_string(),
             title: "Test Task".to_string(),
-            description: "Description".to_string(),
+            description: Some("Description".to_string()),
             sort_order: 1,
             input_type: TaskInputType::None,
-            scores: "5:10:50|10:20:35".to_string(),
-            status: TaskStatus::ChallengeAwaits,
+            scores: Some("5:10:50|10:20:35".to_string()),
+            points: 50,
             is_free: false,
-            is_locked: false,
-            is_paid: false,
             abandoned_deduction: 5,
-            points_earned: 35,
             hints: vec![],
-            validators: vec!["tcp_listening:int(8080)".to_string()],
-            blueprint: None,
+            progress: Some(TaskProgress {
+                status: TaskStatus::ChallengeAwaits,
+                points_earned: 35,
+                ..TaskProgress::default()
+            }),
             prologue: vec![],
             epilogue: vec![],
         };
 
         let cached = CachedTask::from_api_task(&api_task);
 
-        assert_eq!(cached.id, 1);
+        assert_eq!(cached.id, "a9dccd78-7d42-476f-a9d1-83517426449f");
         assert_eq!(cached.slug, "test-task");
         assert_eq!(cached.points, 50); // max points from first tier
         assert_eq!(cached.points_earned, 35);
-        assert_eq!(cached.validators.len(), 1);
+    }
+
+    #[test]
+    fn test_cached_task_from_a_signed_out_task_has_no_progress() {
+        // no `progress` on the wire: an anonymous listing. every derived
+        // number is the untouched one rather than a panic or a stale value.
+        let api_task = Task {
+            id: "a9dccd78-7d42-476f-a9d1-83517426449f".to_string(),
+            slug: "test-task".to_string(),
+            title: "Test Task".to_string(),
+            description: None,
+            sort_order: 1,
+            input_type: TaskInputType::None,
+            scores: None,
+            points: 25,
+            is_free: true,
+            abandoned_deduction: 5,
+            hints: vec![],
+            progress: None,
+            prologue: vec![],
+            epilogue: vec![],
+        };
+
+        let cached = CachedTask::from_api_task(&api_task);
+
+        // no ladder to read, so the task's flat points stand
+        assert_eq!(cached.points, 25);
+        assert_eq!(cached.points_earned, 0);
+        assert_eq!(cached.status, TaskStatus::ChallengeAwaits);
     }
 
     #[test]
@@ -386,24 +424,22 @@ mod tests {
             fetched_at: Utc::now(),
             tasks: vec![
                 CachedTask {
-                    id: 1,
+                    id: "11111111-1111-1111-1111-111111111111".to_string(),
                     slug: "t1".to_string(),
                     title: "Task 1".to_string(),
                     points: 25,
                     points_earned: 20,
                     status: TaskStatus::ChallengeCompleted,
                     sort_order: 1,
-                    validators: vec![],
                 },
                 CachedTask {
-                    id: 2,
+                    id: "22222222-2222-2222-2222-222222222222".to_string(),
                     slug: "t2".to_string(),
                     title: "Task 2".to_string(),
                     points: 50,
                     points_earned: 0,
                     status: TaskStatus::ChallengeAwaits,
                     sort_order: 2,
-                    validators: vec![],
                 },
             ],
             workspace: ".".to_string(),

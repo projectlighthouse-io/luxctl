@@ -265,7 +265,7 @@ pub async fn restart() -> Result<()> {
             }
 
             UI::success(&format!("restarted project: {}", project.name));
-            UI::info(&response.message);
+            UI::info(&format!("you are now on run {}", response.run));
         }
         Err(err) => {
             UI::error("failed to restart project", Some(&format!("{}", err)));

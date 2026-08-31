@@ -46,7 +46,7 @@ pub async fn show(task_id: &str, detailed: bool) -> Result<()> {
         return Ok(());
     };
 
-    let task_data = if let Ok(task_num) = task_id.parse::<usize>() {
+    let listed = if let Ok(task_num) = task_id.parse::<usize>() {
         if task_num == 0 || task_num > tasks.len() {
             UI::error(
                 &format!("task #{} not found", task_num),
@@ -65,7 +65,21 @@ pub async fn show(task_id: &str, detailed: bool) -> Result<()> {
         return Ok(());
     };
 
-    Message::print_task_detail(task_data, detailed);
+    // A project response lists its tasks without their briefs, so the prose
+    // needs the task's own endpoint. Fetched by uuid, which names exactly one
+    // task — a slug names the first project that has one by that name.
+    let task_data = match client.task_by_identifier(&listed.id).await {
+        Ok(t) => t,
+        Err(err) => {
+            UI::error(
+                &format!("failed to fetch task '{}'", listed.slug),
+                Some(&format!("{}", err)),
+            );
+            return Ok(());
+        }
+    };
+
+    Message::print_task_detail(&task_data, detailed);
 
     Ok(())
 }

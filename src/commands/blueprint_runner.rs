@@ -10,7 +10,7 @@ use blueprint::reporter::format_api_payload;
 use blueprint::transpiler::ir::{Blueprint, Value};
 use blueprint::transpiler::{transpile, BlueprintResult, Status};
 
-use crate::api::{SubmitAttemptRequest, Task, TaskOutcome};
+use crate::api::{SubmitAttemptRequest, TaskOutcome};
 use crate::env::{preflight, RunnerImage, Session};
 use crate::runtime::SupportedRuntime;
 use crate::ui::UI;
@@ -52,22 +52,6 @@ fn apply_session(ctx: Context, session: Option<&Session>) -> Context {
         Some(s) => ctx.with_runner(s.runner()).with_facts(s.facts()),
         None => ctx,
     }
-}
-
-/// which validation system a task uses
-pub enum TaskSystem<'a> {
-    Blueprint(&'a str),
-    None,
-}
-
-/// inspect task fields to decide which system to use.
-pub fn detect_system(task: &Task) -> TaskSystem<'_> {
-    if let Some(ref bp) = task.blueprint {
-        if !bp.is_empty() {
-            return TaskSystem::Blueprint(bp);
-        }
-    }
-    TaskSystem::None
 }
 
 /// build the full build command string from a runtime name.
@@ -222,7 +206,7 @@ pub async fn run_result(
 pub fn to_attempt_request(
     result: &BlueprintResult,
     project_slug: &str,
-    task_id: i32,
+    task_id: &str,
 ) -> SubmitAttemptRequest {
     let outcome = match &result.status {
         Status::Passed => TaskOutcome::Passed,
@@ -241,9 +225,8 @@ pub fn to_attempt_request(
 
     SubmitAttemptRequest {
         project_slug: project_slug.to_string(),
-        task_id,
+        task_id: task_id.to_string(),
         task_outcome: outcome,
-        points_achieved: None,
         task_outcome_context: Some(context),
     }
 }
@@ -264,50 +247,6 @@ pub fn parse_inputs(raw: &[String]) -> Result<HashMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{TaskInputType, TaskStatus};
-
-    fn make_task(validators: Vec<String>, blueprint: Option<String>) -> Task {
-        Task {
-            id: 1,
-            uuid: String::new(),
-            slug: "test-task".to_string(),
-            title: "Test".to_string(),
-            description: "test".to_string(),
-            sort_order: 1,
-            input_type: TaskInputType::None,
-            scores: "10:20:50".to_string(),
-            status: TaskStatus::ChallengeAwaits,
-            is_free: false,
-            is_locked: false,
-            is_paid: false,
-            abandoned_deduction: 5,
-            points_earned: 0,
-            hints: vec![],
-            validators,
-            blueprint,
-            prologue: vec![],
-            epilogue: vec![],
-        }
-    }
-
-    #[test]
-    fn test_detect_blueprint() {
-        let task = make_task(vec![], Some("blueprint \"test\" {}".to_string()));
-        assert!(matches!(detect_system(&task), TaskSystem::Blueprint(_)));
-    }
-
-    #[test]
-    fn test_detect_none_without_blueprint() {
-        let task = make_task(vec![], None);
-        assert!(matches!(detect_system(&task), TaskSystem::None));
-    }
-
-    #[test]
-    fn test_detect_none_with_empty_blueprint() {
-        let task = make_task(vec![], Some(String::new()));
-        assert!(matches!(detect_system(&task), TaskSystem::None));
-    }
-
     #[test]
     fn test_parse_inputs_valid() {
         let raw = vec!["key=value".to_string(), "foo=bar".to_string()];
@@ -348,9 +287,13 @@ mod tests {
             input_provided: HashMap::new(),
         };
 
-        let req = to_attempt_request(&bp_result, "my-project", 42);
+        let req = to_attempt_request(
+            &bp_result,
+            "my-project",
+            "a9dccd78-7d42-476f-a9d1-83517426449f",
+        );
         assert_eq!(req.project_slug, "my-project");
-        assert_eq!(req.task_id, 42);
+        assert_eq!(req.task_id, "a9dccd78-7d42-476f-a9d1-83517426449f");
         assert!(matches!(req.task_outcome, TaskOutcome::Passed));
         assert!(req.task_outcome_context.is_some());
     }
@@ -366,7 +309,7 @@ mod tests {
             input_provided: HashMap::new(),
         };
 
-        let req = to_attempt_request(&bp_result, "my-lab", 1);
+        let req = to_attempt_request(&bp_result, "my-lab", "11111111-1111-1111-1111-111111111111");
         assert!(matches!(req.task_outcome, TaskOutcome::Failed));
     }
 

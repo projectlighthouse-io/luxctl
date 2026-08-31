@@ -71,19 +71,17 @@ pub async fn result(task_id: &str, inputs: &[String], project_slug: Option<&str>
         return Ok(());
     };
 
-    if !task_data.has_blueprint() {
+    // The blueprint belongs to the project, not the task: one file, and the
+    // phase this task runs is picked out of it by slug.
+    if !lab_data.has_blueprint() {
         oops!(
-            "task '{}' has no blueprint — `result` only works with blueprint tasks",
-            task_data.slug
-        );
-        say!(
-            "use `luxctl run --task {}` for legacy validator tasks",
-            task_data.slug
+            "project '{}' has no blueprint — nothing to run",
+            project_slug
         );
         return Ok(());
     }
 
-    let bp_source = task_data.blueprint.as_deref().unwrap_or_default();
+    let bp_source = lab_data.blueprint_source();
     let user_inputs = blueprint_runner::parse_inputs(inputs)?;
     let active = state.get_active();
     let workspace = active.map(|l| PathBuf::from(&l.workspace));
@@ -129,7 +127,7 @@ pub async fn result(task_id: &str, inputs: &[String], project_slug: Option<&str>
 
     // submit before printing so we can show XP on the summary line
     let attempt_request =
-        blueprint_runner::to_attempt_request(&bp_result, &project_slug, task_data.id);
+        blueprint_runner::to_attempt_request(&bp_result, &project_slug, &task_data.id);
     let points = submit_and_update(
         &client,
         &attempt_request,

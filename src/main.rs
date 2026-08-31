@@ -89,12 +89,6 @@ enum Commands {
         action: HintAction,
     },
 
-    /// Single-file DSA challenges (LRU Cache, Group Anagrams, etc.)
-    Terminal {
-        #[command(subcommand)]
-        action: TerminalAction,
-    },
-
     /// Manage the pinned Linux environment that `linux|` blueprints run in
     Env {
         #[command(subcommand)]
@@ -224,34 +218,6 @@ enum HintAction {
 }
 
 #[derive(Subcommand)]
-enum TerminalAction {
-    /// See all available terminal challenges
-    List,
-    /// Set the active terminal and workspace
-    Start {
-        #[arg(short = 's', long)]
-        slug: String,
-
-        /// Workspace directory (defaults to current directory)
-        #[arg(short = 'w', long, default_value = ".", value_hint = ValueHint::DirPath)]
-        workspace: String,
-
-        /// Language (go, rust, c) — selects which test files to inject
-        #[arg(short = 'l', long)]
-        lang: Option<String>,
-    },
-    /// Run the active terminal's blueprint against your solution
-    Run {
-        #[arg(short = 'd', long)]
-        detailed: bool,
-    },
-    /// See active terminal info
-    Status,
-    /// Clear the active terminal
-    Stop,
-}
-
-#[derive(Subcommand)]
 enum EnvAction {
     /// See the detected backend and what it provides
     Status,
@@ -321,7 +287,7 @@ async fn main() -> Result<()> {
                         if let Some(index) = web {
                             let url = if index < 0 {
                                 format!("{}/projects", LIGHTHOUSE_URL)
-                            } else if let Some(project) = response.data.get(index as usize) {
+                            } else if let Some(project) = response.items.get(index as usize) {
                                 project.url()
                             } else {
                                 oops!("invalid index: {}", index);
@@ -366,7 +332,7 @@ async fn main() -> Result<()> {
                     let client = LighthouseAPIClient::from_config(&config);
                     match client.projects(None, None).await {
                         Ok(response) => {
-                            if let Some(project) = response.data.get(index) {
+                            if let Some(project) = response.items.get(index) {
                                 project.slug.clone()
                             } else {
                                 oops!("invalid index: {}", index);
@@ -419,28 +385,6 @@ async fn main() -> Result<()> {
             EnvAction::Up => commands::env::up().await?,
             EnvAction::Down => commands::env::down().await?,
             EnvAction::Upgrade => commands::env::upgrade().await?,
-        },
-
-        Commands::Terminal { action } => match action {
-            TerminalAction::List => {
-                commands::terminal::list().await?;
-            }
-            TerminalAction::Start {
-                slug,
-                workspace,
-                lang,
-            } => {
-                commands::terminal::start(&slug, &workspace, lang.as_deref())?;
-            }
-            TerminalAction::Run { detailed } => {
-                commands::terminal::run_active(detailed).await?;
-            }
-            TerminalAction::Status => {
-                commands::terminal::status()?;
-            }
-            TerminalAction::Stop => {
-                commands::terminal::stop()?;
-            }
         },
 
         Commands::Run {
