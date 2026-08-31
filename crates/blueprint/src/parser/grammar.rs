@@ -551,10 +551,34 @@ fn is_operator_keyword(s: &str) -> bool {
     )
 }
 
+/// Put back the escapes the lexer took out of a double-quoted string.
+///
+/// `collect_rest_of_line_as_string` rebuilds a probe line out of its tokens,
+/// and by then `read_double_quoted_string` has already turned `\"` into `"`
+/// and `\t` into a tab. Re-wrapping without re-escaping does not give back
+/// the line the author wrote: the quotes that were *content* become
+/// indistinguishable from the ones that were *delimiters*, and `shell_split`
+/// drops them. That is how `awk -F: '{print $1 \"\t\" $6}'` reached the shell
+/// as `{print $1 <tab> $6}`, which concatenates the two fields instead of
+/// separating them.
+fn escape_double_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn token_to_string(tok: &Token) -> String {
     match tok {
         Token::Ident(s) => s.clone(),
-        Token::QuotedString(s) => format!("\"{s}\""),
+        Token::QuotedString(s) => format!("\"{}\"", escape_double_quoted(s)),
         Token::SingleQuotedString(s) => format!("'{s}'"),
         Token::Int(n) => n.to_string(),
         Token::Float(f) => f.to_string(),

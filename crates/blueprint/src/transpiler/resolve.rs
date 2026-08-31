@@ -885,29 +885,76 @@ fn parse_timeout_from_line(line: &str) -> Option<std::time::Duration> {
     parse_duration(rest)
 }
 
+/// Split a probe's command into argv the way a shell would.
+///
+/// **A backslash escapes the next character.** Without that, a quote written
+/// as `\"` in the blueprint — content, not a delimiter — is read as a
+/// delimiter and dropped, which silently rewrites the command. It is what
+/// turned `awk -F: '{print $1 \"\t\" $6}'` into `{print $1 <tab> $6}`, an awk
+/// program that concatenates two fields rather than separating them, and it
+/// corrupted the *expected* side of every probe that diffs against one.
+///
+/// The rules are a shell's, because the string is on its way to one. Inside
+/// single quotes nothing is an escape. Inside double quotes a backslash only
+/// escapes `"`, `\`, `$` and a backtick; before anything else *both*
+/// characters stay, so `\t` and `\n` reach awk and printf as the two
+/// characters they expand themselves — turning them into a real tab or newline
+/// here would put a raw newline inside an awk string literal, which is a
+/// syntax error. Unquoted, a backslash escapes whatever follows it.
+///
+/// An empty quoted string is an argument: `--format ''` passes one empty
+/// argument rather than none, which is why emptiness alone cannot decide
+/// whether there is an argument to push.
 fn shell_split(input: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
     let mut in_double = false;
-    for ch in input.chars() {
+    // Distinguishes "no argument yet" from "an argument that is empty".
+    let mut started = false;
+    let mut chars = input.chars();
+
+    while let Some(ch) = chars.next() {
         match ch {
+            '\\' if !in_single => {
+                match chars.next() {
+                    // What a shell unescapes inside double quotes, and
+                    // anything at all when unquoted.
+                    Some(next) if !in_double || matches!(next, '"' | '\\' | '$' | '`') => {
+                        current.push(next);
+                    }
+                    // Left for whoever runs the command to interpret.
+                    Some(next) => {
+                        current.push('\\');
+                        current.push(next);
+                    }
+                    // A trailing backslash is not an escape of anything.
+                    None => current.push('\\'),
+                }
+                started = true;
+            }
             '\'' if !in_double => {
                 in_single = !in_single;
+                started = true;
             }
             '"' if !in_single => {
                 in_double = !in_double;
+                started = true;
             }
-            ' ' if !in_single && !in_double => {
-                if !current.is_empty() {
-                    result.push(current.clone());
-                    current.clear();
+            _ if ch.is_whitespace() && !in_single && !in_double => {
+                if started {
+                    result.push(std::mem::take(&mut current));
+                    started = false;
                 }
             }
-            _ => current.push(ch),
+            _ => {
+                current.push(ch);
+                started = true;
+            }
         }
     }
-    if !current.is_empty() {
+
+    if started {
         result.push(current);
     }
     result
@@ -1509,6 +1556,50 @@ blueprint "T" {
             Probe::Http(p) => assert!(matches!(p.mode, HttpMode::Concurrent { clients: 10 })),
             other => panic!("expected HttpProbe, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_shell_split_keeps_an_escaped_quote_as_content() {
+        // The quote is content, not a delimiter. Dropping it rewrote the awk
+        // program into one that concatenated its two fields.
+        let result = shell_split(r#"bash -c "awk '{print $1 \"\t\" $6}'""#);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], "bash");
+        assert_eq!(result[1], "-c");
+        assert_eq!(result[2], r#"awk '{print $1 "\t" $6}'"#);
+    }
+
+    #[test]
+    fn test_shell_split_keeps_runs_of_spaces_inside_quotes() {
+        // A printf format's column padding is content too.
+        let result = shell_split(r#"bash -c "printf 'a:  %s\n' x""#);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[2], r"printf 'a:  %s\n' x");
+    }
+
+    #[test]
+    fn test_shell_split_leaves_a_backslash_alone_inside_single_quotes() {
+        // A shell does not process escapes in single quotes, and neither does
+        // this: `\.` is a regex, not an escaped dot.
+        let result = shell_split(r"grep -E '10\.0\.[0-9]+'");
+
+        assert_eq!(result, vec!["grep", "-E", r"10\.0\.[0-9]+"]);
+    }
+
+    #[test]
+    fn test_shell_split_treats_an_empty_quoted_string_as_an_argument() {
+        let result = shell_split("docker inspect --format ''");
+
+        assert_eq!(result, vec!["docker", "inspect", "--format", ""]);
+    }
+
+    #[test]
+    fn test_shell_split_splits_on_any_whitespace_outside_quotes() {
+        let result = shell_split("echo\tone  two");
+
+        assert_eq!(result, vec!["echo", "one", "two"]);
     }
 
     #[test]
