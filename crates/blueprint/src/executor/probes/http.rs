@@ -305,6 +305,11 @@ async fn execute_burst(
     }
 
     let duration = start.elapsed();
+    // a burst has no single `status`, so `expect { status: 429 }` finds no
+    // field and fails. "some requests were rate limited" is
+    // `rejected-status: 429` (429 if any response was a 429, else 0) or
+    // `rejected: > 0`; "some got through" is `accepted: > 0`. `rejected` also
+    // counts requests that failed outright; `rejected-status` does not.
     let mut fields = HashMap::new();
     fields.insert("accepted".to_string(), Value::Int(accepted));
     fields.insert("rejected".to_string(), Value::Int(rejected));
@@ -452,5 +457,62 @@ mod tests {
         assert!(
             matches!(result.fields.get("body.json.greeting"), Some(Value::String(s)) if s == "hello")
         );
+    }
+
+    #[tokio::test]
+    async fn test_burst_reports_rate_limiting_as_rejected_status() {
+        // answers the first two requests and rate limits the rest
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let port = listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .port();
+        tokio::spawn(async move {
+            for served in 0.. {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = [0u8; 1024];
+                let _ = socket.read(&mut request).await;
+                let status = if served < 2 {
+                    "200 OK"
+                } else {
+                    "429 Too Many Requests"
+                };
+                let response =
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let config = Config {
+            host: "127.0.0.1".to_string(),
+            port: Some(port),
+            ..Config::default()
+        };
+        let ctx = Context::new(config, ExecutionMode::Validate);
+        let probe = HttpProbe {
+            method: HttpMethod::GET,
+            path: "/".to_string(),
+            body: None,
+            headers: HashMap::new(),
+            mode: HttpMode::Burst {
+                count: 5,
+                window_ms: 100,
+            },
+        };
+
+        let result = execute(&probe, &ctx)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(result.fields.get("accepted"), Some(Value::Int(2))));
+        assert!(matches!(result.fields.get("rejected"), Some(Value::Int(3))));
+        assert!(matches!(
+            result.fields.get("rejected-status"),
+            Some(Value::Int(429))
+        ));
+        assert!(result.fields.get("status").is_none());
     }
 }
