@@ -513,6 +513,6 @@ mod tests {
             result.fields.get("rejected-status"),
             Some(Value::Int(429))
         ));
-        assert!(result.fields.get("status").is_none());
+        assert!(!result.fields.contains_key("status"));
     }
 }
