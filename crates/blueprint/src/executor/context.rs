@@ -147,19 +147,29 @@ impl Context {
 
     /// interpolate $variable references in a string
     pub fn interpolate(&self, s: &str) -> String {
-        let mut result = s.to_string();
-        for (key, value) in &self.variables {
+        let variables = self.variables.iter().map(|(key, value)| {
             let var_ref = if key.starts_with('$') {
                 key.clone()
             } else {
                 format!("${key}")
             };
-            result = result.replace(&var_ref, &value.to_string());
-        }
-        // also interpolate user inputs
-        for (key, value) in &self.user_inputs {
-            let var_ref = format!("${key}");
-            result = result.replace(&var_ref, value);
+            (var_ref, value.to_string())
+        });
+        // also interpolate user inputs, after variables of the same name
+        let inputs = self
+            .user_inputs
+            .iter()
+            .map(|(key, value)| (format!("${key}"), value.clone()));
+
+        // longest name first: `$BIN` is a prefix of `$BIN_PATH`, and replacing
+        // it first turns `$BIN_PATH` into `<bin>_PATH`. HashMap order is random,
+        // so without this the corruption came and went between runs.
+        let mut refs: Vec<(String, String)> = variables.chain(inputs).collect();
+        refs.sort_by_key(|(var_ref, _)| std::cmp::Reverse(var_ref.len()));
+
+        let mut result = s.to_string();
+        for (var_ref, value) in refs {
+            result = result.replace(&var_ref, &value);
         }
         result
     }
@@ -196,6 +206,20 @@ mod tests {
 
         let result = ctx.interpolate("http://$host:$port/api");
         assert_eq!(result, "http://localhost:8080/api");
+    }
+
+    #[test]
+    fn test_interpolation_prefers_the_longer_name() {
+        // `$BIN` is a prefix of `$BIN_PATH`; whichever the map yields first,
+        // the longer one must win. Repeated because HashMap order varies.
+        for _ in 0..50 {
+            let mut ctx = Context::new(Config::default(), ExecutionMode::Validate);
+            ctx.set_variable("BIN", Value::String("seachart".into()));
+            ctx.set_variable("BIN_PATH", Value::String("./seachart".into()));
+
+            let result = ctx.interpolate("$BIN_PATH --encode google.com && $BIN -v");
+            assert_eq!(result, "./seachart --encode google.com && seachart -v");
+        }
     }
 
     #[test]
