@@ -199,22 +199,25 @@ async fn run_blueprint_task(
 
     // submit before printing so we can show XP on the summary line
     let attempt_request = blueprint_runner::to_attempt_request(&bp_result, project_slug, &task.id);
-    let points = submit_and_update(client, &attempt_request, task, state_ctx).await;
+    let submission = submit_and_update(client, &attempt_request, task, state_ctx).await;
+    let points = submission.as_ref().ok().copied().flatten();
 
     CliReporter::print_result_with_context(&bp_result, detailed, completed_slugs, points);
+    report_unrecorded(&submission);
 
     run_epilogue(&ui, &task.epilogue).await;
     Ok(())
 }
 
 /// submit attempt to API and update local state cache.
-/// returns points earned on first-time pass, None otherwise.
+/// returns points earned on first-time pass (None otherwise), or why the api
+/// refused to record the attempt.
 pub async fn submit_and_update(
     client: &LighthouseAPIClient,
     attempt_request: &SubmitAttemptRequest,
     task: &Task,
     state_ctx: Option<(&mut ProjectState, &str)>,
-) -> Option<i32> {
+) -> Result<Option<i32>, String> {
     match client.submit_attempt(attempt_request).await {
         Ok(attempt) => {
             log::debug!("attempt recorded: {:?}", attempt);
@@ -242,13 +245,22 @@ pub async fn submit_and_update(
                 }
             }
 
-            points
+            Ok(points)
         }
         Err(err) => {
             log::error!("failed to submit attempt: {}", err);
-            oops!("failed to submit results: {}", err);
-            None
+            Err(err.to_string())
         }
+    }
+}
+
+/// say plainly that the run was not recorded, after the summary so it is the
+/// last thing on screen. The summary speaks only for the checks: when the api
+/// refused the attempt (a 403 `task_locked`, say), "all checks passed" was the
+/// last word and read as a pass that counted.
+pub fn report_unrecorded(submission: &Result<Option<i32>, String>) {
+    if let Err(reason) = submission {
+        oops!("  result NOT recorded: {}", reason);
     }
 }
 
@@ -354,5 +366,46 @@ mod tests {
 
         let result = shell::run_commands(&commands).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_refused_attempt_is_reported_as_not_recorded() {
+        use crate::api::TaskOutcome;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // a stand-in api that refuses the attempt the way the real one does
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let body = r#"{"code":"task_locked","error":"Finish the task before this one first."}"#;
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+
+        let client =
+            LighthouseAPIClient::for_tests(&format!("http://127.0.0.1:{port}"), "token").unwrap();
+        let task = make_task_with_hooks(vec![], vec![]);
+        let request = SubmitAttemptRequest {
+            project_slug: "p".to_string(),
+            task_id: task.id.clone(),
+            task_outcome: TaskOutcome::Passed,
+            task_outcome_context: None,
+        };
+
+        let reason = submit_and_update(&client, &request, &task, None)
+            .await
+            .unwrap_err();
+        assert!(reason.contains("403"), "{reason}");
+        assert!(reason.contains("task_locked"), "{reason}");
+        assert!(
+            reason.contains("Finish the task before this one first."),
+            "{reason}"
+        );
     }
 }

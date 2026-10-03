@@ -86,6 +86,19 @@ impl LighthouseAPIClient {
         }
     }
 
+    /// a client for a local stand-in api, signed with the dev secret
+    #[cfg(test)]
+    pub(crate) fn for_tests(base_url: &str, token: &str) -> Result<LighthouseAPIClient> {
+        let base_url =
+            LighthouseAPIClientBaseURL::from(base_url, Env::DEV).map_err(|e| eyre!(e))?;
+        Ok(Self::new(
+            base_url,
+            "v1",
+            Env::DEV,
+            Some(SecretString::from(token.to_string())),
+        ))
+    }
+
     pub fn from_config(config: &Config) -> LighthouseAPIClient {
         LighthouseAPIClient {
             token: Some(SecretString::from(config.expose_token())),

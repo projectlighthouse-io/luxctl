@@ -6,7 +6,7 @@ use color_eyre::eyre::Result;
 
 use crate::api::LighthouseAPIClient;
 use crate::commands::blueprint_runner;
-use crate::commands::run::submit_and_update;
+use crate::commands::run::{report_unrecorded, submit_and_update};
 use crate::config::Config;
 use crate::shell;
 use crate::state::ProjectState;
@@ -128,15 +128,17 @@ pub async fn result(task_id: &str, inputs: &[String], project_slug: Option<&str>
     // submit before printing so we can show XP on the summary line
     let attempt_request =
         blueprint_runner::to_attempt_request(&bp_result, &project_slug, &task_data.id);
-    let points = submit_and_update(
+    let submission = submit_and_update(
         &client,
         &attempt_request,
         task_data,
         Some((&mut state, &token)),
     )
     .await;
+    let points = submission.as_ref().ok().copied().flatten();
 
     CliReporter::print_result_with_context(&bp_result, false, &HashSet::new(), points);
+    report_unrecorded(&submission);
 
     // epilogue
     if !task_data.epilogue.is_empty() {
