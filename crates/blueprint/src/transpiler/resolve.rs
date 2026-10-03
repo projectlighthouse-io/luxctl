@@ -1558,6 +1558,55 @@ blueprint "T" {
         }
     }
 
+    fn first_http_probe(input: &str) -> HttpProbe {
+        let bp = transpile_str(input).unwrap_or_else(|e| panic!("{e}"));
+        match &bp.phases[0].steps[0].probe {
+            Probe::Http(p) => p.clone(),
+            other => panic!("expected HttpProbe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_json_body_and_the_modifiers_after_it_survive() {
+        // the `{` of the body used to end the probe line: the body and
+        // `concurrent 4` were dropped and the probe ran once, with no body
+        let p = first_http_probe(
+            r#"
+blueprint "T" {
+    phase "t" {
+        step "s" {
+            probe http POST /jobs {"type":"echo","payload":"hi"} concurrent 4
+            expect { all status: 202 }
+        }
+    }
+}
+"#,
+        );
+        assert_eq!(p.path, "/jobs");
+        assert_eq!(p.body.as_deref(), Some(r#"{"type":"echo","payload":"hi"}"#));
+        assert!(matches!(p.mode, HttpMode::Concurrent { clients: 4 }));
+
+        let p = first_http_probe(
+            r#"
+blueprint "T" {
+    phase "t" {
+        step "s" {
+            probe http POST /jobs {"type": "echo"} burst 100 window 1s expect { rejected: > 0 }
+        }
+    }
+}
+"#,
+        );
+        assert_eq!(p.body.as_deref(), Some(r#"{"type": "echo"}"#));
+        assert!(matches!(
+            p.mode,
+            HttpMode::Burst {
+                count: 100,
+                window_ms: 1000
+            }
+        ));
+    }
+
     #[test]
     fn test_shell_split_keeps_an_escaped_quote_as_content() {
         // The quote is content, not a delimiter. Dropping it rewrote the awk

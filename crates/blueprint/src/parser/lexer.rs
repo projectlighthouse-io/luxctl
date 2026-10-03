@@ -121,6 +121,31 @@ fn tokenize_line(line: &str, line_num: usize) -> Result<Vec<LocatedToken>, Parse
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
 
+    // a probe's arguments are kept as the author wrote them. Tokenizing them
+    // loses the text: `{` reads as a block opener, so a JSON body and every
+    // modifier after it (`concurrent 4`) vanished, and `?` falls to the Raw
+    // arm, so `/search?q=hello` came back as `/search ?q=hello`. Whatever
+    // follows the arguments — an inline `expect { ... }`, the enclosing
+    // block's `}`, a comment — is tokenized as usual below.
+    if let Some(args_start) = probe_args_start(&chars) {
+        tokens.push(LocatedToken {
+            value: Token::Ident("probe".to_string()),
+            line: line_num,
+            col: 1,
+        });
+        let args_end = probe_args_end(&chars, args_start);
+        let args: String = chars[args_start..args_end].iter().collect();
+        let args = args.trim();
+        if !args.is_empty() {
+            tokens.push(LocatedToken {
+                value: Token::Raw(args.to_string()),
+                line: line_num,
+                col: args_start + 1,
+            });
+        }
+        i = args_end;
+    }
+
     while i < chars.len() {
         // skip whitespace
         if chars[i].is_whitespace() {
@@ -310,6 +335,66 @@ fn tokenize_line(line: &str, line_num: usize) -> Result<Vec<LocatedToken>, Parse
     }
 
     Ok(tokens)
+}
+
+/// Where a probe's arguments begin, if this line is a probe line.
+fn probe_args_start(chars: &[char]) -> Option<usize> {
+    let keyword = ['p', 'r', 'o', 'b', 'e'];
+    let after = chars.get(keyword.len())?;
+    (chars.starts_with(&keyword) && after.is_whitespace()).then_some(keyword.len())
+}
+
+/// Where a probe's arguments end: at a `#` comment, at a `}` that closes the
+/// enclosing block, or at a block keyword opening an inline block
+/// (`expect {`). Quotes and the braces of a JSON body are skipped over, so
+/// none of those inside them count.
+fn probe_args_end(chars: &[char], start: usize) -> usize {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut i = start;
+
+    while let Some(&ch) = chars.get(i) {
+        let prev = i.checked_sub(1).and_then(|p| chars.get(p));
+        let after_space = i == start || prev.is_some_and(|c| c.is_whitespace());
+        if let Some(q) = quote {
+            if ch == '\\' && q == '"' {
+                i += 1;
+            } else if ch == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '"' => quote = Some('"'),
+            // same rule as the tokenizer: `doesn't` is not a quote
+            '\'' if !prev.is_some_and(|c| c.is_alphanumeric()) => quote = Some('\''),
+            '{' => depth += 1,
+            '}' if depth == 0 => return i,
+            '}' => depth -= 1,
+            '#' if after_space => return i,
+            _ if depth == 0 && after_space && ch.is_alphabetic() => {
+                let mut end = i;
+                while chars
+                    .get(end)
+                    .is_some_and(|c| c.is_alphanumeric() || *c == '-')
+                {
+                    end += 1;
+                }
+                let mut next = end;
+                while chars.get(next).is_some_and(|c| c.is_whitespace()) {
+                    next += 1;
+                }
+                let word: String = chars[i..end].iter().collect();
+                if chars.get(next) == Some(&'{') && super::grammar::is_block_kw(&word) {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    chars.len()
 }
 
 fn read_word(chars: &[char], i: &mut usize) -> String {

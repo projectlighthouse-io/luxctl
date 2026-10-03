@@ -526,7 +526,7 @@ impl Parser {
     }
 }
 
-fn is_block_kw(s: &str) -> bool {
+pub(super) fn is_block_kw(s: &str) -> bool {
     matches!(
         s,
         "phase"
