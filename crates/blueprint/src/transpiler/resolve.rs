@@ -1608,6 +1608,41 @@ blueprint "T" {
     }
 
     #[test]
+    fn test_query_string_stays_on_the_path() {
+        // `?` used to be split off as its own token, so the request went to
+        // `/search` with `?q=hello` sent as the body
+        let p = first_http_probe(
+            r#"
+blueprint "T" {
+    phase "t" {
+        step "s" {
+            probe http GET /search?q=hello&limit=2
+            expect { status: 200 }
+        }
+    }
+}
+"#,
+        );
+        assert_eq!(p.path, "/search?q=hello&limit=2");
+        assert_eq!(p.body, None);
+
+        let p = first_http_probe(
+            r#"
+blueprint "T" {
+    phase "t" {
+        step "s" {
+            probe http POST /workers/scale?count=6
+            expect { status: 200 }
+        }
+    }
+}
+"#,
+        );
+        assert_eq!(p.path, "/workers/scale?count=6");
+        assert_eq!(p.body, None);
+    }
+
+    #[test]
     fn test_shell_split_keeps_an_escaped_quote_as_content() {
         // The quote is content, not a delimiter. Dropping it rewrote the awk
         // program into one that concatenated its two fields.
