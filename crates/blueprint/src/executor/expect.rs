@@ -360,6 +360,12 @@ pub fn evaluate_input(
                 Op::Eq => value_eq(&user_val, &expected_resolved),
                 Op::Matches => value_matches(&user_val, &expected_resolved),
                 Op::Contains => value_contains(&user_val, &expected_resolved),
+                // the answer arrives as text; compared the way a probe field
+                // is, so `$answer >= 1` holds for "3" and fails for "three"
+                Op::Gt => value_cmp(&user_val, &expected_resolved, |a, b| a > b),
+                Op::Lt => value_cmp(&user_val, &expected_resolved, |a, b| a < b),
+                Op::Gte => value_cmp(&user_val, &expected_resolved, |a, b| a >= b),
+                Op::Lte => value_cmp(&user_val, &expected_resolved, |a, b| a <= b),
                 _ => false,
             };
             if !passed {
@@ -653,5 +659,31 @@ mod tests {
             &c,
         );
         assert!(passed);
+    }
+
+    #[test]
+    fn test_input_numeric_comparison() {
+        let check = |answer: &str, op: Op, expected: i64| {
+            let (passed, _) = evaluate_input(
+                "answer",
+                answer,
+                &[Expectation {
+                    field: FieldPath::simple("$answer"),
+                    op,
+                    expected: ExpectedValue::Int(expected),
+                }],
+                &pr(vec![]),
+                &ctx(),
+            );
+            passed
+        };
+        assert!(check("3", Op::Gte, 1));
+        assert!(check("1", Op::Gte, 1));
+        assert!(!check("0", Op::Gte, 1));
+        assert!(check("2.5", Op::Gt, 2));
+        assert!(check("4", Op::Lt, 5));
+        assert!(!check("5", Op::Lt, 5));
+        assert!(check("5", Op::Lte, 5));
+        assert!(!check("three", Op::Gte, 1));
     }
 }
