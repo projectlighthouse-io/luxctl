@@ -1157,6 +1157,7 @@ dependencies = [
  "color-eyre",
  "colored",
  "log",
+ "nix",
  "regex",
  "reqwest",
  "serde",

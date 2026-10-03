@@ -3,6 +3,7 @@ use crate::executor::error::ExecutionError;
 use crate::transpiler::ir::{ExecProbe, ProbeResult, Value};
 use log::debug;
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
@@ -58,16 +59,38 @@ pub async fn execute_with_timeout(
         deadline.as_secs()
     );
 
-    let output = tokio::time::timeout(deadline, cmd.output())
-        .await
-        .map_err(|_| {
-            ExecutionError::new(format!(
+    // what `output()` would set up, done by hand so the child is ours to kill
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // its own process group, so a timeout can take down whatever the command
+    // started as well. A server the probe launched, or one a `sh -c` script
+    // backgrounded, otherwise outlived the timeout and kept its port. The
+    // cost: Ctrl-C at the terminal no longer reaches it. In linux| mode this
+    // only reaches the `docker exec` client, not the process in the container.
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| ExecutionError::new(format!("failed to execute '{}': {}", command, e)))?;
+    let pid = child.id();
+
+    let output = match tokio::time::timeout(deadline, child.wait_with_output()).await {
+        Ok(output) => output
+            .map_err(|e| ExecutionError::new(format!("failed to execute '{}': {}", command, e)))?,
+        Err(_) => {
+            // the dropped future took the child with it (kill_on_drop); this
+            // gets the rest of its group
+            kill_process_group(pid);
+            return Err(ExecutionError::new(format!(
                 "'{}' timed out after {}s",
                 command,
                 deadline.as_secs()
-            ))
-        })?
-        .map_err(|e| ExecutionError::new(format!("failed to execute '{}': {}", command, e)))?;
+            )));
+        }
+    };
 
     let duration = start.elapsed();
 
@@ -90,6 +113,23 @@ pub async fn execute_with_timeout(
         duration_ms: duration.as_millis() as u64,
     })
 }
+
+#[cfg(unix)]
+fn kill_process_group(pid: Option<u32>) {
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+
+    let Some(pgid) = pid.and_then(|p| i32::try_from(p).ok()) else {
+        return;
+    };
+    // ESRCH just means everything in it has already exited
+    if let Err(e) = killpg(Pid::from_raw(pgid), Signal::SIGKILL) {
+        debug!("exec: killing process group {pgid}: {e}");
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
@@ -163,6 +203,43 @@ mod tests {
             matches!(result.fields.get("stdout"), Some(Value::String(s)) if s == "hello world")
         );
         assert!(matches!(result.fields.get("exit"), Some(Value::Int(0))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_timeout_kills_what_the_command_started() {
+        // stands in for a server the probe launched: a background process
+        // that would keep running, and keep its port, after the timeout
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let pid_file = dir.path().join("pid");
+        let probe = ExecProbe {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!("sleep 30 & echo $! > {}; wait", pid_file.display()),
+            ],
+        };
+        let ctx = Context::new(Config::default(), ExecutionMode::Validate);
+
+        let result = execute_with_timeout(&probe, &ctx, Some(Duration::from_millis(500))).await;
+        assert!(result.is_err(), "the probe should have timed out");
+
+        let pid = std::fs::read_to_string(&pid_file).unwrap_or_else(|e| panic!("{e}"));
+        let pid = pid.trim();
+        let mut alive = true;
+        for _ in 0..20 {
+            let status = std::process::Command::new("kill")
+                .args(["-0", pid])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap_or_else(|e| panic!("{e}"));
+            if !status.success() {
+                alive = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!alive, "background process {pid} outlived the timeout");
     }
 
     #[tokio::test]
