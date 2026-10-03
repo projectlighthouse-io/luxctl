@@ -172,7 +172,17 @@ fn resolve_field<'a>(path: &FieldPath, result: &'a ProbeResult) -> Option<&'a Va
     if let Some(v) = result.get(path) {
         return Some(v);
     }
-    result.fields.get(&path.to_string())
+    let key = path.to_string();
+    if let Some(v) = result.fields.get(&key) {
+        return Some(v);
+    }
+    // header names are case-insensitive, and the http probe stores them as
+    // reqwest gives them: lowercase. `header.Content-Type` has to find
+    // `header.content-type`, or no blueprint written the usual way can pass.
+    let name = key.strip_prefix("header.")?;
+    result
+        .fields
+        .get(&format!("header.{}", name.to_ascii_lowercase()))
 }
 
 fn resolve_expected(expected: &ExpectedValue, ctx: &Context) -> ExpectedValue {
@@ -486,6 +496,37 @@ mod tests {
                 expected: ExpectedValue::Bool(true),
             }],
             &pr(vec![("header.Server", Value::String("nginx".into()))]),
+            &ctx(),
+        );
+        assert_eq!(r[0].status, Status::Passed);
+    }
+
+    #[test]
+    fn test_header_lookup_ignores_case() {
+        // the http probe stores header names lowercase, as reqwest gives them
+        let probe = pr(vec![
+            ("header.server", Value::String("lux".into())),
+            ("header.content-type", Value::String("text/plain".into())),
+        ]);
+        for field in ["header.Server", "header.server", "header.SERVER"] {
+            let r = evaluate_expectations(
+                &[Expectation {
+                    field: FieldPath::from_dotted(field),
+                    op: Op::Eq,
+                    expected: ExpectedValue::Str("lux".into()),
+                }],
+                &probe,
+                &ctx(),
+            );
+            assert_eq!(r[0].status, Status::Passed, "{field}");
+        }
+        let r = evaluate_expectations(
+            &[Expectation {
+                field: FieldPath::from_dotted("header.Content-Type"),
+                op: Op::Contains,
+                expected: ExpectedValue::Str("text/plain".into()),
+            }],
+            &probe,
             &ctx(),
         );
         assert_eq!(r[0].status, Status::Passed);
