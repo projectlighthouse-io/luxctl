@@ -14,6 +14,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 colored = "3.0.0"
 color-eyre = "0.6.5"
 log = "0.4.29"
+flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal"] }

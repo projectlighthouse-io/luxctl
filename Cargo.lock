@@ -1156,6 +1156,7 @@ version = "0.4.0"
 dependencies = [
  "color-eyre",
  "colored",
+ "flate2",
  "log",
  "nix",
  "regex",

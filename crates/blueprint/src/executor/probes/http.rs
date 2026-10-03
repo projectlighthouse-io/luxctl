@@ -82,10 +82,27 @@ async fn execute_single(
         }
     }
 
-    let body = response
-        .text()
-        .await
-        .map_err(|e| ExecutionError::new(format!("failed to read response body: {e}")))?;
+    let gzipped = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("gzip"));
+
+    // a gzip body is decompressed here rather than by reqwest's `gzip`
+    // feature, which strips Content-Encoding from the response: a blueprint
+    // checks both that the server compressed and what it compressed
+    let body = if gzipped {
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ExecutionError::new(format!("failed to read response body: {e}")))?;
+        gunzip(&bytes)?
+    } else {
+        response
+            .text()
+            .await
+            .map_err(|e| ExecutionError::new(format!("failed to read response body: {e}")))?
+    };
 
     fields.insert("body".to_string(), Value::String(body.clone()));
 
@@ -304,6 +321,22 @@ async fn execute_burst(
     })
 }
 
+/// decompress a body the server sent with `Content-Encoding: gzip`. One that
+/// claims gzip and isn't is the server's bug, and the probe says so.
+fn gunzip(bytes: &[u8]) -> Result<String, ExecutionError> {
+    use std::io::Read;
+
+    let mut decoded = Vec::new();
+    flate2::read::MultiGzDecoder::new(bytes)
+        .read_to_end(&mut decoded)
+        .map_err(|e| {
+            ExecutionError::new(format!(
+                "response says Content-Encoding: gzip but the body is not valid gzip: {e}"
+            ))
+        })?;
+    Ok(String::from_utf8_lossy(&decoded).into_owned())
+}
+
 /// flatten a JSON value into dotted key paths in the fields map
 fn flatten_json(prefix: &str, value: &serde_json::Value, fields: &mut HashMap<String, Value>) {
     match value {
@@ -355,5 +388,69 @@ fn flatten_json(prefix: &str, value: &serde_json::Value, fields: &mut HashMap<St
         serde_json::Value::Null => {
             fields.insert(prefix.to_string(), Value::Null);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::context::ExecutionMode;
+    use crate::transpiler::ir::Config;
+    use std::io::Write;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn test_gzip_body_is_decompressed_and_its_header_kept() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(br#"{"greeting":"hello"}"#)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let gzipped = encoder.finish().unwrap_or_else(|e| panic!("{e}"));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let port = listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap_or_else(|e| panic!("{e}"));
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                gzipped.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&gzipped).await;
+        });
+
+        let config = Config {
+            host: "127.0.0.1".to_string(),
+            port: Some(port),
+            ..Config::default()
+        };
+        let ctx = Context::new(config, ExecutionMode::Validate);
+        let probe = HttpProbe {
+            method: HttpMethod::GET,
+            path: "/".to_string(),
+            body: None,
+            headers: HashMap::new(),
+            mode: HttpMode::Single,
+        };
+
+        let result = execute(&probe, &ctx)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            matches!(result.fields.get("header.content-encoding"), Some(Value::String(s)) if s == "gzip")
+        );
+        assert!(
+            matches!(result.fields.get("body"), Some(Value::String(s)) if s == r#"{"greeting":"hello"}"#)
+        );
+        assert!(
+            matches!(result.fields.get("body.json.greeting"), Some(Value::String(s)) if s == "hello")
+        );
     }
 }
