@@ -135,7 +135,7 @@ jobs:
                 "type": "section",
                 "text": {
                   "type": "mrkdwn",
-                  "text": "• *Installed:* \`luxctl upgrade\`\n• *New install:* \`curl -fsSL https://raw.githubusercontent.com/thearyanahmed/luxctl/master/install.sh | bash\`\n• *Windows:* download from https://github.com/thearyanahmed/luxctl/releases/tag/v$VERSION"
+                  "text": "• *Installed:* \`luxctl upgrade\`\n• *New install:* \`curl -fsSL https://raw.githubusercontent.com/projectlighthouse-io/luxctl/master/install.sh | bash\`\n• *Windows:* download from https://github.com/projectlighthouse-io/luxctl/releases/tag/v$VERSION"
                 }
               }
             ]

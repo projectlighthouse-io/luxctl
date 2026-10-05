@@ -2,7 +2,7 @@
 set -e
 
 # luxctl installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/thearyanahmed/luxctl/master/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/projectlighthouse-io/luxctl/master/install.sh | bash
 #
 # Downloads a pre-built binary when available (Linux x86_64/aarch64, macOS aarch64).
 # Falls back to `cargo install` for unsupported platforms (e.g. macOS Intel).
@@ -11,7 +11,7 @@ set -e
 #   LUXCTL_VERSION   - pin a specific version (e.g. "v0.8.2"), default: latest
 #   INSTALL_DIR      - where to put the binary, default: /usr/local/bin
 
-REPO="thearyanahmed/luxctl"
+REPO="projectlighthouse-io/luxctl"
 VERSION="${LUXCTL_VERSION:-}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
