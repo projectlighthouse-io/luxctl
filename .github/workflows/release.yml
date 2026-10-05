@@ -76,33 +76,9 @@ jobs:
           fi
           echo "Version verified: $CARGO_VERSION"
 
-      - name: Publish lux-blueprint to crates.io
-        if: steps.check_release.outputs.exists == 'false'
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          BP_VERSION=$(grep '^version' crates/blueprint/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-
-          # skip only when this exact version is already on crates.io. a bare
-          # `|| echo skipping` also swallows real publish failures, and then
-          # luxctl gets verified against a stale lux-blueprint and fails to
-          # compile with unresolved imports.
-          if curl -s https://index.crates.io/lu/x-/lux-blueprint | grep -q "\"vers\":\"$BP_VERSION\""; then
-            echo "lux-blueprint $BP_VERSION already published, skipping"
-          else
-            cargo publish -p lux-blueprint --dry-run
-            cargo publish -p lux-blueprint
-            sleep 15
-          fi
-
-      - name: Publish luxctl to crates.io
-        if: steps.check_release.outputs.exists == 'false'
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          cargo publish --dry-run
-          cargo publish
-
+      # not published to crates.io: a build from source has no
+      # LUXCTL_CLIENT_SECRET and the api rejects it. the release binaries below
+      # are the only way to get luxctl.
       - name: Generate changelog
         if: steps.check_release.outputs.exists == 'false'
         run: |
@@ -152,14 +128,14 @@ jobs:
                 "type": "section",
                 "text": {
                   "type": "mrkdwn",
-                  "text": "A new version of luxctl has been published to crates.io.\n\n*Upgrade to the latest version:*"
+                  "text": "A new version of luxctl is on GitHub Releases.\n\n*Upgrade to the latest version:*"
                 }
               },
               {
                 "type": "section",
                 "text": {
                   "type": "mrkdwn",
-                  "text": "• *macOS/Linux:* \`cargo install luxctl --version $VERSION\`\n• *Windows:* \`cargo install luxctl --version $VERSION\`"
+                  "text": "• *Installed:* \`luxctl upgrade\`\n• *New install:* \`curl -fsSL https://raw.githubusercontent.com/thearyanahmed/luxctl/master/install.sh | bash\`\n• *Windows:* download from https://github.com/thearyanahmed/luxctl/releases/tag/v$VERSION"
                 }
               }
             ]
@@ -326,19 +302,23 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Wait for crates.io index
+      - name: Download luxctl from the release
         shell: bash
-        run: sleep 30
-
-      - name: Install luxctl from crates.io
-        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${{ inputs.tag }}"
-          VERSION="${VERSION#v}"  # remove 'v' prefix
-          cargo install luxctl --version "$VERSION"
+          case "${{ runner.os }}" in
+            Linux)   BIN=luxctl-linux-x86_64;        ARCHIVE=$BIN.tar.gz ;;
+            macOS)   BIN=luxctl-macos-aarch64;       ARCHIVE=$BIN.tar.gz ;;
+            Windows) BIN=luxctl-windows-x86_64.exe;  ARCHIVE=$BIN.zip ;;
+          esac
+
+          gh release download "${{ inputs.tag }}" --repo ${{ github.repository }} --pattern "$ARCHIVE"
+          case "$ARCHIVE" in
+            *.zip) 7z x "$ARCHIVE" ;;
+            *)     tar -xzf "$ARCHIVE" ;;
+          esac
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
 
       - name: Verify installed version
         shell: bash
@@ -346,7 +326,7 @@ jobs:
           EXPECTED_VERSION="${{ inputs.tag }}"
           EXPECTED_VERSION="${EXPECTED_VERSION#v}"  # remove 'v' prefix
 
-          INSTALLED_VERSION=$(luxctl --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          INSTALLED_VERSION=$(./"$BIN" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 
           echo "Expected: $EXPECTED_VERSION"
           echo "Installed: $INSTALLED_VERSION"
