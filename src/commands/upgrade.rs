@@ -49,8 +49,11 @@ fn asset_name() -> Result<String> {
         ("linux", "x86_64") => Ok("luxctl-linux-x86_64.tar.gz".to_string()),
         ("linux", "aarch64") => Ok("luxctl-linux-aarch64.tar.gz".to_string()),
         ("macos", "aarch64") => Ok("luxctl-macos-aarch64.tar.gz".to_string()),
+        ("macos", "x86_64") => Ok("luxctl-macos-x86_64.tar.gz".to_string()),
+        // not `cargo install`: a source build has no client secret and the api
+        // rejects it.
         _ => bail!(
-            "no pre-built binary for {os}/{arch}. install from source:\n  cargo install luxctl"
+            "can't upgrade in place on {os}/{arch}. download the latest release from:\n  https://github.com/{GITHUB_REPO}/releases"
         ),
     }
 }
