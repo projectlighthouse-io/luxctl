@@ -8,14 +8,14 @@ CLI for [projectlighthouse.io](https://projectlighthouse.io) — learn by buildi
 
 ### Pre-built Binaries (Recommended)
 
-Download the latest binary for your platform from the [releases page](https://github.com/thearyanahmed/luxctl/releases):
+Download the latest binary for your platform from the [releases page](https://github.com/projectlighthouse-io/luxctl/releases):
 
 
 ### Via Install Script
 
 ```bash
 # one-liner (installs Rust if needed)
-curl -fsSL https://raw.githubusercontent.com/thearyanahmed/luxctl/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/projectlighthouse-io/luxctl/master/install.sh | bash
 ```
 
 ### Via Cargo

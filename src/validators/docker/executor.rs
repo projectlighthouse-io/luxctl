@@ -10,7 +10,7 @@ use tokio::time::{timeout, Duration};
 use super::registry::{self, ImageSource};
 
 const DOCKERFILE_BASE_URL: &str =
-    "https://raw.githubusercontent.com/thearyanahmed/luxctl/master/docker";
+    "https://raw.githubusercontent.com/projectlighthouse-io/luxctl/master/docker";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// result from running a container

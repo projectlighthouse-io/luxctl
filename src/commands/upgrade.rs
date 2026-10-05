@@ -6,7 +6,7 @@ use tar::Archive;
 
 use crate::VERSION;
 
-const GITHUB_REPO: &str = "thearyanahmed/luxctl";
+const GITHUB_REPO: &str = "projectlighthouse-io/luxctl";
 
 #[derive(serde::Deserialize)]
 struct GitHubRelease {
