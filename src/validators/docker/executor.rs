@@ -2,9 +2,18 @@
 //!
 //! for security, only images registered in the registry module can be executed.
 
+use bollard::body_full;
+use bollard::container::LogOutput;
+use bollard::models::{ContainerCreateBody, HostConfig};
+use bollard::query_parameters::{
+    BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptions, CreateImageOptionsBuilder,
+    KillContainerOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptions,
+    StartContainerOptions, WaitContainerOptions,
+};
+use bollard::Docker;
+use futures_util::StreamExt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 use super::registry::{self, ImageSource};
@@ -30,6 +39,7 @@ impl ExecutorResult {
 /// executor for running Dockerfiles
 pub struct DockerExecutor {
     cache_dir: PathBuf,
+    docker: Docker,
 }
 
 impl DockerExecutor {
@@ -42,7 +52,11 @@ impl DockerExecutor {
         std::fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("failed to create cache dir: {}", e))?;
 
-        Ok(Self { cache_dir })
+        // connect to Docker
+        let docker = Docker::connect_with_local_defaults()
+            .map_err(|e| format!("failed to connect to Docker daemon: {}", e))?;
+
+        Ok(Self { cache_dir, docker })
     }
 
     /// download a Dockerfile by name from GitHub
@@ -144,12 +158,7 @@ impl DockerExecutor {
             .await;
 
         // cleanup: remove the image
-        let _ = Command::new("docker")
-            .args(["rmi", "-f", &image_tag])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        let _ = self.remove_image(&image_tag).await;
 
         run_result
     }
@@ -169,20 +178,14 @@ impl DockerExecutor {
 
         // pull the image
         eprintln!("  pulling {} ...", image_url);
-        let pull_result = Command::new("docker")
-            .args(["pull", image_url])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| format!("failed to pull image: {}", e))?;
+        let options = CreateImageOptionsBuilder::default()
+            .from_image(image_url)
+            .build();
 
-        if !pull_result.status.success() {
-            return Ok(ExecutorResult {
-                exit_code: pull_result.status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&pull_result.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&pull_result.stderr).to_string(),
-            });
+        let mut pull_stream = self.docker.create_image(Some(options), None, None);
+
+        while let Some(item) = pull_stream.next().await {
+            item.map_err(|e| format!("failed to pull image: '{}': {}", image_url, e))?;
         }
 
         // run the container
@@ -197,25 +200,50 @@ impl DockerExecutor {
         context: &str,
         tag: &str,
     ) -> Result<ExecutorResult, String> {
-        let output = Command::new("docker")
-            .args([
-                "build",
-                "-f",
-                dockerfile_path.to_string_lossy().as_ref(),
-                "-t",
-                tag,
-                context,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| format!("failed to run docker build: {}", e))?;
+        let tar_gz = self
+            .build_context_tarball(dockerfile_path, context)
+            .map_err(|e| format!("failed to build context tarball: {}", e))?;
+
+        let options = BuildImageOptionsBuilder::default()
+            .dockerfile("Dockerfile")
+            .t(tag)
+            .rm(true)
+            .version(BuilderVersion::BuilderBuildKit)
+            .build();
+
+        let mut build_stream =
+            self.docker
+                .build_image(options, None, Some(body_full(tar_gz.into())));
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut had_error = false;
+
+        while let Some(msg) = build_stream.next().await {
+            match msg {
+                Ok(info) => {
+                    if let Some(stream) = info.stream {
+                        stdout.push_str(&stream);
+                    }
+
+                    if let Some(err_detail) = info.error_detail {
+                        if let Some(msg) = err_detail.message {
+                            stderr.push_str(&msg);
+                        }
+                        had_error = true;
+                    }
+                }
+                Err(e) => {
+                    stderr.push_str(&format!("{}\n", e));
+                    had_error = true;
+                }
+            }
+        }
 
         Ok(ExecutorResult {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: if had_error { 1 } else { 0 },
+            stdout,
+            stderr,
         })
     }
 
@@ -225,39 +253,159 @@ impl DockerExecutor {
         workspace: &str,
         timeout_secs: Option<u64>,
     ) -> Result<ExecutorResult, String> {
-        let timeout_duration = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
-
-        let result = timeout(
-            timeout_duration,
-            Command::new("docker")
-                .args([
-                    "run",
-                    "--rm",
-                    "--network=host",
-                    "-v",
-                    &format!("{}:/app", workspace),
-                    "-w",
-                    "/app",
-                    image,
-                ])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output(),
-        )
-        .await;
-
-        match result {
-            Ok(Ok(output)) => Ok(ExecutorResult {
-                exit_code: output.status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        let secs = timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
+        let config = ContainerCreateBody {
+            image: Some(image.to_string()),
+            working_dir: Some("/app".to_string()),
+            host_config: Some(HostConfig {
+                binds: Some(vec![format!("{}:/app", workspace)]),
+                network_mode: Some("host".to_string()),
+                ..Default::default()
             }),
-            Ok(Err(e)) => Err(format!("docker run failed: {}", e)),
-            Err(_) => Err(format!(
-                "container timed out after {}s",
-                timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)
-            )),
+            ..Default::default()
+        };
+
+        let container = self
+            .docker
+            .create_container(None::<CreateContainerOptions>, config)
+            .await
+            .map_err(|e| format!("failed to create container: {}", e))?;
+
+        let id = container.id;
+
+        if let Err(e) = self
+            .docker
+            .start_container(&id, None::<StartContainerOptions>)
+            .await
+        {
+            let _ = self.cleanup_container(&id).await;
+            return Err(format!("failed to start container: {}", e));
         }
+
+        let wait_stream = self
+            .docker
+            .wait_container(&id, None::<WaitContainerOptions>);
+
+        let exit_code =
+            match timeout(Duration::from_secs(secs), wait_stream.collect::<Vec<_>>()).await {
+                Ok(results) => match results.into_iter().last() {
+                    Some(Ok(res)) => res.status_code as i32,
+                    Some(Err(e)) => {
+                        let _ = self.cleanup_container(&id).await;
+                        return Err(format!("failed to wait for container: {}", e));
+                    }
+                    None => -1,
+                },
+
+                Err(_) => {
+                    let _ = self
+                        .docker
+                        .kill_container(&id, None::<KillContainerOptions>)
+                        .await;
+                    let _ = self.cleanup_container(&id).await;
+                    return Err(format!("container timed out after {} seconds", secs));
+                }
+            };
+
+        let options = LogsOptionsBuilder::default()
+            .stderr(true)
+            .stdout(true)
+            .build();
+
+        let mut log_stream = self.docker.logs(&id, Some(options));
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+
+        while let Some(chunk) = log_stream.next().await {
+            match chunk {
+                Ok(LogOutput::StdOut { message }) => {
+                    stdout.push_str(&String::from_utf8_lossy(&message));
+                }
+                Ok(LogOutput::StdErr { message }) => {
+                    stderr.push_str(&String::from_utf8_lossy(&message));
+                }
+                _ => {}
+            }
+        }
+
+        let _ = self.cleanup_container(&id).await;
+
+        Ok(ExecutorResult {
+            exit_code,
+            stdout,
+            stderr,
+        })
+    }
+
+    async fn cleanup_container(&self, id: &str) -> Result<(), String> {
+        let options = RemoveContainerOptionsBuilder::default().force(true).build();
+        self.docker
+            .remove_container(id, Some(options))
+            .await
+            .map_err(|e| format!("failed to remove container '{}': {}", id, e))?;
+        Ok(())
+    }
+
+    async fn remove_image(&self, tag: &str) -> Result<(), String> {
+        self.docker
+            .remove_image(tag, None::<RemoveImageOptions>, None)
+            .await
+            .map_err(|e| format!("failed to remove image '{}': {}", tag, e))?;
+        Ok(())
+    }
+
+    pub async fn is_docker_available(&self) -> bool {
+        self.docker.version().await.is_ok()
+    }
+
+    fn build_context_tarball(
+        &self,
+        dockerfile_path: &Path,
+        context: &str,
+    ) -> Result<Vec<u8>, String> {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let mut tar = tar::Builder::new(Vec::new());
+
+        tar.append_dir_all("", context)
+            .map_err(|e| format!("failed to create tarball: {}", e))?;
+
+        let dockerfile_content = std::fs::read(dockerfile_path)
+            .map_err(|e| format!("failed to read Dockerfile: {}", e))?;
+
+        let mut header = tar::Header::new_gnu();
+        header
+            .set_path("Dockerfile")
+            .map_err(|e| format!("failed to create tarball: {}", e))?;
+        header.set_size(dockerfile_content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+
+        tar.append(&header, dockerfile_content.as_slice())
+            .map_err(|e| format!("failed to append Dockerfile to tar: {}", e))?;
+
+        let uncompressed = tar
+            .into_inner()
+            .map_err(|e| format!("failed to finalize tar: {}", e))?;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(&uncompressed)
+            .map_err(|e| format!("failed to compress tarball: {}", e))?;
+
+        encoder
+            .finish()
+            .map_err(|e| format!("failed to finish gzip: {}", e))
+    }
+}
+
+/// check if docker is available
+pub async fn is_docker_available() -> bool {
+    match Docker::connect_with_local_defaults() {
+        Ok(docker) => docker.version().await.is_ok(),
+        Err(_) => false,
     }
 }
 
@@ -271,18 +419,6 @@ fn sanitize_for_docker_tag(s: &str) -> String {
             _ => '-',
         })
         .collect()
-}
-
-/// check if docker is available
-pub async fn is_docker_available() -> bool {
-    Command::new("docker")
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -356,5 +492,42 @@ mod tests {
             "api-client-test"
         );
         assert_eq!(sanitize_for_docker_tag("test_image"), "test_image");
+    }
+
+    #[test]
+    fn test_tarball_contains_dockerfile() {
+        use flate2::read::GzDecoder;
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("luxctl_test_ctx");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let dockerfile = tmp.join("Dockerfile.test");
+        let mut f = std::fs::File::create(&dockerfile).unwrap();
+        writeln!(f, "FROM alpine:latest").unwrap();
+        writeln!(f, "RUN echo hello").unwrap();
+
+        let executor = match DockerExecutor::new() {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        let tar_gz = executor
+            .build_context_tarball(&dockerfile, tmp.to_str().unwrap())
+            .expect("tarball should build");
+
+        let decoder = GzDecoder::new(&tar_gz[..]);
+        let mut archive = tar::Archive::new(decoder);
+        let mut found_dockerfile = false;
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path().unwrap();
+            if path.to_str() == Some("Dockerfile") {
+                found_dockerfile = true;
+            }
+        }
+
+        assert!(found_dockerfile, "tar must contain a Dockerfile entry");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
