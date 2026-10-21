@@ -126,7 +126,7 @@ async fn check_network(config: &Option<Config>) {
     let client = LighthouseAPIClient::from_config(config);
     match client.me().await {
         Ok(user) => {
-            UI::ok("api", Some(&format!("connected as {}", user.email)));
+            UI::ok("api", Some(&format!("connected as {}", user.name)));
         }
         Err(e) => {
             UI::error("api", Some(&format!("{}", e)));
