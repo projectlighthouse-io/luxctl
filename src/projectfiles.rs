@@ -35,10 +35,17 @@ pub async fn download_fixtures(project_slug: &str, workspace: &Path) -> Result<b
         }
     };
 
+    // a 404 means the project has no fixture branch: nothing to download, so
+    // nothing to warn about. most projects ship no files.
+    // ponytail: a misnamed branch is silent too, and shows up as a task
+    // failing on a missing ./logs/ file. check the blueprint for fixture
+    // paths before deciding, if that ever bites.
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        log::debug!("no fixture branch for '{}'", project_slug);
+        return Ok(false);
+    }
+
     if !response.status().is_success() {
-        // a 404 means the project has no fixture branch. that is normal for
-        // projects that ship no files, but it also happens when a branch is
-        // named wrong — so say it out loud instead of failing tasks silently.
         UI::warn(
             &format!("no project files downloaded for '{}'", project_slug),
             Some(&format!("HTTP {}", response.status().as_u16())),
