@@ -10,22 +10,29 @@ CLI for [projectlighthouse.io](https://projectlighthouse.io) — learn by buildi
 
 Download the latest binary for your platform from the [releases page](https://github.com/projectlighthouse-io/luxctl/releases):
 
+- Linux x86_64 / aarch64 (glibc and musl)
+- macOS Apple Silicon / Intel
+- Windows x86_64
 
 ### Via Install Script
 
 ```bash
-# one-liner (installs Rust if needed)
+# one-liner: downloads the pre-built binary for your platform
 curl -fsSL https://raw.githubusercontent.com/projectlighthouse-io/luxctl/master/install.sh | bash
+
+# pin a version or change the install directory (default: /usr/local/bin)
+curl -fsSL https://raw.githubusercontent.com/projectlighthouse-io/luxctl/master/install.sh | LUXCTL_VERSION=v0.15.1 INSTALL_DIR=~/.local/bin bash
 ```
 
-### Via Cargo
+On Windows, run the script from Git Bash; it installs to `%USERPROFILE%\bin`.
 
-> **Note:** `cargo install luxctl` builds from source without the production client secret,
+### From Source
+
+> **Note:** luxctl is no longer published to crates.io. A source build lacks the production client secret,
 > so API requests will be rejected with HTTP 403. Use the install script or pre-built binaries instead.
-> If you need to build from source, set `LUXCTL_CLIENT_SECRET` at compile time. This is for development only, if you can mock
-> projectlighthouse.io's api.
+> Building from source is for development only, against a mocked projectlighthouse.io API:
 > ```bash
-> LUXCTL_CLIENT_SECRET="<secret>" cargo install luxctl
+> LUXCTL_CLIENT_SECRET="<secret>" cargo install --path .
 > ```
 
 ## Upgrade
@@ -138,26 +145,29 @@ luxctl hint list --task 1
 luxctl hint unlock --task 1 --hint $hint_uuid
 ```
 
-### Terminal Challenges
-
-Single-file DSA challenges (LRU Cache, Group Anagrams, etc.).
+### Project Files
 
 ```bash
-# list available terminal challenges
-luxctl terminal list
+# download or refresh fixture files for the active project
+luxctl sync
+```
 
-# start a terminal challenge
-luxctl terminal start --slug lru-cache --workspace ~/challenges
+### Linux Environment
 
-# run validation against your solution
-luxctl terminal run
-luxctl terminal run --detailed
+Some projects run inside a pinned Linux environment.
 
-# see active terminal info
-luxctl terminal status
+```bash
+# see the detected backend and what it provides
+luxctl env status
 
-# clear the active terminal
-luxctl terminal stop
+# provision and start the environment
+luxctl env up
+
+# stop it
+luxctl env down
+
+# pull the current pinned image
+luxctl env upgrade
 ```
 
 ### Helpers
@@ -206,7 +216,8 @@ cargo clippy          # lint
 ## Supported Runtimes
 
 - **Go** - detects `go.mod`, builds with `go build .`
-- **Rust** - detects `Cargo.toml`, builds with `cargo check`
+- **Rust** - detects `Cargo.toml`, builds with `cargo build`
+- **C** - detects `Makefile`, builds with `make`
 
 ## Contributing
 
@@ -249,9 +260,10 @@ Releases are automated via GitHub Actions. To create a new release:
 The Release workflow will:
 - Run tests
 - Verify version matches tag
-- Publish to crates.io
 - Generate changelog
-- Create GitHub release
+- Create a draft GitHub release
+- Build and upload binaries for each platform
+- Publish the release
 
 ## License
 
